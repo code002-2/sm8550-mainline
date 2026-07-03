@@ -28,6 +28,8 @@ struct typec_switch_desc {
 #if IS_ENABLED(CONFIG_TYPEC)
 
 struct typec_switch *fwnode_typec_switch_get(struct fwnode_handle *fwnode);
+struct typec_switch *
+fwnode_typec_switch_get_by_node(struct fwnode_handle *fwnode);
 void typec_switch_put(struct typec_switch *sw);
 int typec_switch_set(struct typec_switch *sw,
 		     enum typec_orientation orientation);
@@ -44,6 +46,12 @@ void *typec_switch_get_drvdata(struct typec_switch_dev *sw);
 
 static inline struct typec_switch *
 fwnode_typec_switch_get(struct fwnode_handle *fwnode)
+{
+	return NULL;
+}
+
+static inline struct typec_switch *
+fwnode_typec_switch_get_by_node(struct fwnode_handle *fwnode)
 {
 	return NULL;
 }

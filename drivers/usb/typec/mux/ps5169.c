@@ -251,9 +251,25 @@ static const struct regmap_config ps5169_regmap = {
 	.max_register = 0xff,
 };
 
+static struct device_node *ps5169_get_downstream_node(struct device *dev)
+{
+	struct device_node *ep;
+	struct device_node *node;
+
+	ep = of_graph_get_endpoint_by_regs(dev->of_node, 1, -1);
+	if (!ep)
+		return NULL;
+
+	node = of_graph_get_remote_port_parent(ep);
+	of_node_put(ep);
+
+	return node;
+}
+
 static int ps5169_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
+	struct device_node *downstream_node;
 	struct typec_switch_desc sw_desc = { };
 	struct typec_retimer_desc retimer_desc = { };
 	struct ps5169 *ps5169;
@@ -282,10 +298,18 @@ static int ps5169_probe(struct i2c_client *client)
 		return dev_err_probe(dev, PTR_ERR(ps5169->reset_gpio),
 				     "failed to get reset gpio\n");
 
+	downstream_node = ps5169_get_downstream_node(dev);
+
 	ps5169->typec_switch = typec_switch_get(dev);
-	if (IS_ERR(ps5169->typec_switch))
-		return dev_err_probe(dev, PTR_ERR(ps5169->typec_switch),
+	if (!ps5169->typec_switch && downstream_node)
+		ps5169->typec_switch =
+			fwnode_typec_switch_get_by_node(
+				of_fwnode_handle(downstream_node));
+	if (IS_ERR(ps5169->typec_switch)) {
+		ret = dev_err_probe(dev, PTR_ERR(ps5169->typec_switch),
 				     "failed to acquire orientation-switch\n");
+		goto err_node_put;
+	}
 
 	ps5169->typec_mux = typec_mux_get(dev);
 	if (IS_ERR(ps5169->typec_mux)) {
@@ -293,6 +317,9 @@ static int ps5169_probe(struct i2c_client *client)
 				    "failed to acquire mode-switch\n");
 		goto err_switch_put;
 	}
+
+	of_node_put(downstream_node);
+	downstream_node = NULL;
 
 	ret = regulator_enable(ps5169->dvdd_supply);
 	if (ret) {
@@ -349,6 +376,8 @@ err_mux_put:
 	typec_mux_put(ps5169->typec_mux);
 err_switch_put:
 	typec_switch_put(ps5169->typec_switch);
+err_node_put:
+	of_node_put(downstream_node);
 
 	return ret;
 }

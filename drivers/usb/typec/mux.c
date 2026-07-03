@@ -128,6 +128,46 @@ put_sw_devs:
 EXPORT_SYMBOL_GPL(fwnode_typec_switch_get);
 
 /**
+ * fwnode_typec_switch_get_by_node - Find USB Type-C orientation switch by node
+ * @fwnode: The switch device node
+ *
+ * Finds a switch registered with @fwnode. Returns a reference to the switch on
+ * success, NULL if @fwnode does not describe a switch, or
+ * ERR_PTR(-EPROBE_DEFER) when @fwnode describes a switch but it has not been
+ * registered yet.
+ */
+struct typec_switch *
+fwnode_typec_switch_get_by_node(struct fwnode_handle *fwnode)
+{
+	struct typec_switch_dev *sw_dev;
+	struct typec_switch *sw;
+	struct device *dev;
+
+	if (!fwnode || !fwnode_property_present(fwnode, "orientation-switch"))
+		return NULL;
+
+	dev = class_find_device(&typec_mux_class, NULL, fwnode,
+				switch_fwnode_match);
+	if (!dev)
+		return ERR_PTR(-EPROBE_DEFER);
+
+	sw = kzalloc_obj(*sw);
+	if (!sw) {
+		put_device(dev);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	sw_dev = to_typec_switch_dev(dev);
+	WARN_ON(!try_module_get(sw_dev->dev.parent->driver->owner));
+
+	sw->sw_devs[0] = sw_dev;
+	sw->num_sw_devs = 1;
+
+	return sw;
+}
+EXPORT_SYMBOL_GPL(fwnode_typec_switch_get_by_node);
+
+/**
  * typec_switch_put - Release USB Type-C orientation switch
  * @sw: USB Type-C orientation switch
  *
