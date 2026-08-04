@@ -453,6 +453,9 @@ static int dwc3_usb_role_switch_set(struct usb_role_switch *sw,
 	struct dwc3 *dwc = usb_role_switch_get_drvdata(sw);
 	u32 mode;
 
+	if (dwc->glue_ops && dwc->glue_ops->role_switch_set)
+		return dwc->glue_ops->role_switch_set(dwc, role);
+
 	switch (role) {
 	case USB_ROLE_HOST:
 		mode = DWC3_GCTL_PRTCAP_HOST;
@@ -478,6 +481,9 @@ static enum usb_role dwc3_usb_role_switch_get(struct usb_role_switch *sw)
 	struct dwc3 *dwc = usb_role_switch_get_drvdata(sw);
 	unsigned long flags;
 	enum usb_role role;
+
+	if (dwc->glue_ops && dwc->glue_ops->role_switch_get)
+		return dwc->glue_ops->role_switch_get(dwc);
 
 	spin_lock_irqsave(&dwc->lock, flags);
 	switch (dwc->current_dr_role) {
