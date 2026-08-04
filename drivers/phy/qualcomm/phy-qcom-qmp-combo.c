@@ -2295,6 +2295,7 @@ struct qmp_combo {
 	struct mutex phy_mutex;
 	int init_count;
 	enum qmpphy_mode qmpphy_mode;
+	enum qmpphy_mode pending_mode;
 
 	struct phy *usb_phy;
 	enum phy_mode phy_mode;
@@ -2305,6 +2306,7 @@ struct qmp_combo {
 	struct phy_configure_opts_dp dp_opts;
 	unsigned int dp_init_count;
 	bool dp_powered_on;
+	bool pending_mode_valid;
 
 	struct clk_fixed_rate pipe_clk_fixed;
 	struct clk_hw dp_link_hw;
@@ -2315,6 +2317,9 @@ struct qmp_combo {
 
 	struct typec_mux_dev *mux;
 };
+
+static void qmp_combo_apply_mode(struct qmp_combo *qmp,
+				 enum qmpphy_mode new_mode);
 
 static void qmp_v3_dp_aux_init(struct qmp_combo *qmp);
 static void qmp_v3_configure_dp_tx(struct qmp_combo *qmp);
@@ -3841,6 +3846,7 @@ static int qmp_combo_dp_power_on(struct phy *phy)
 static int qmp_combo_dp_power_off(struct phy *phy)
 {
 	struct qmp_combo *qmp = phy_get_drvdata(phy);
+	enum qmpphy_mode pending_mode;
 
 	mutex_lock(&qmp->phy_mutex);
 
@@ -3848,6 +3854,11 @@ static int qmp_combo_dp_power_off(struct phy *phy)
 	writel(DP_PHY_PD_CTL_PSR_PWRDN, qmp->dp_dp_phy + QSERDES_DP_PHY_PD_CTL);
 
 	qmp->dp_powered_on = false;
+	if (qmp->pending_mode_valid) {
+		pending_mode = qmp->pending_mode;
+		qmp->pending_mode_valid = false;
+		qmp_combo_apply_mode(qmp, pending_mode);
+	}
 
 	mutex_unlock(&qmp->phy_mutex);
 
@@ -4449,51 +4460,10 @@ static int qmp_combo_typec_switch_set(struct typec_switch_dev *sw,
 	return 0;
 }
 
-static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state)
+static void qmp_combo_apply_mode(struct qmp_combo *qmp,
+				 enum qmpphy_mode new_mode)
 {
-	struct qmp_combo *qmp = typec_mux_get_drvdata(mux);
 	const struct qmp_phy_cfg *cfg = qmp->cfg;
-	enum qmpphy_mode new_mode;
-	unsigned int svid;
-
-	guard(mutex)(&qmp->phy_mutex);
-
-	if (state->alt)
-		svid = state->alt->svid;
-	else
-		svid = 0;
-
-	if (svid == USB_TYPEC_DP_SID) {
-		switch (state->mode) {
-		/* DP Only */
-		case TYPEC_DP_STATE_C:
-		case TYPEC_DP_STATE_E:
-			new_mode = QMPPHY_MODE_DP_ONLY;
-			break;
-
-		/* DP + USB */
-		case TYPEC_DP_STATE_D:
-		case TYPEC_DP_STATE_F:
-
-		/* Safe fallback...*/
-		default:
-			new_mode = QMPPHY_MODE_USB3DP;
-			break;
-		}
-	} else {
-		/* No DP SVID => don't care, assume it's just USB3 */
-		new_mode = QMPPHY_MODE_USB3_ONLY;
-	}
-
-	if (new_mode == qmp->qmpphy_mode) {
-		dev_dbg(qmp->dev, "typec_mux_set: same qmpphy mode, bail out\n");
-		return 0;
-	}
-
-	if (qmp->qmpphy_mode != QMPPHY_MODE_USB3_ONLY && qmp->dp_powered_on) {
-		dev_dbg(qmp->dev, "typec_mux_set: DP PHY is still in use, delaying switch\n");
-		return 0;
-	}
 
 	dev_dbg(qmp->dev, "typec_mux_set: switching from qmpphy mode %d to %d\n",
 		qmp->qmpphy_mode, new_mode);
@@ -4528,6 +4498,58 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
 				cfg->dp_aux_init(qmp);
 		}
 	}
+}
+
+static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state)
+{
+	struct qmp_combo *qmp = typec_mux_get_drvdata(mux);
+	enum qmpphy_mode new_mode;
+	unsigned int svid;
+
+	guard(mutex)(&qmp->phy_mutex);
+
+	if (state->alt)
+		svid = state->alt->svid;
+	else
+		svid = 0;
+
+	if (svid == USB_TYPEC_DP_SID) {
+		switch (state->mode) {
+		/* DP Only */
+		case TYPEC_DP_STATE_C:
+		case TYPEC_DP_STATE_E:
+			new_mode = QMPPHY_MODE_DP_ONLY;
+			break;
+
+		/* DP + USB */
+		case TYPEC_DP_STATE_D:
+		case TYPEC_DP_STATE_F:
+
+		/* Safe fallback...*/
+		default:
+			new_mode = QMPPHY_MODE_USB3DP;
+			break;
+		}
+	} else {
+		/* No DP SVID => don't care, assume it's just USB3 */
+		new_mode = QMPPHY_MODE_USB3_ONLY;
+	}
+
+	if (new_mode == qmp->qmpphy_mode) {
+		qmp->pending_mode_valid = false;
+		dev_dbg(qmp->dev, "typec_mux_set: same qmpphy mode, bail out\n");
+		return 0;
+	}
+
+	if (qmp->qmpphy_mode != QMPPHY_MODE_USB3_ONLY && qmp->dp_powered_on) {
+		qmp->pending_mode = new_mode;
+		qmp->pending_mode_valid = true;
+		dev_dbg(qmp->dev, "typec_mux_set: DP PHY is still in use, deferring switch\n");
+		return 0;
+	}
+
+	qmp->pending_mode_valid = false;
+	qmp_combo_apply_mode(qmp, new_mode);
 
 	return 0;
 }
