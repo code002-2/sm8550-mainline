@@ -994,10 +994,14 @@ struct dwc3_scratchpad_array {
 /**
  * struct dwc3_glue_ops - The ops indicate the notifications that
  *				need to be passed on to glue layer
+ * @role_switch_set: Allow glue to handle USB role switch requests
+ * @role_switch_get: Allow glue to report the connector USB role
  * @pre_set_role: Notify glue of role switch notifications
  * @pre_run_stop: Notify run stop enable/disable information to glue
  */
 struct dwc3_glue_ops {
+	int	(*role_switch_set)(struct dwc3 *dwc, enum usb_role role);
+	enum usb_role (*role_switch_get)(struct dwc3 *dwc);
 	void	(*pre_set_role)(struct dwc3 *dwc, enum usb_role role);
 	void	(*pre_run_stop)(struct dwc3 *dwc, bool is_on);
 };
