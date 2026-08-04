@@ -152,6 +152,12 @@ properties:
       HS/FS/LS modes are supported.
     type: boolean
 
+  mode-switch:
+    description:
+      Register a Type-C mode switch which changes the controller to USB2-only
+      operation while the SuperSpeed lanes are used for four-lane DisplayPort.
+    type: boolean
+
   wakeup-source: true
 
 required:
