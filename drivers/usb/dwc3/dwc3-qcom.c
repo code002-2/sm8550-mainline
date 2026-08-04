@@ -17,8 +17,13 @@
 #include <linux/usb/of.h>
 #include <linux/reset.h>
 #include <linux/iopoll.h>
+#include <linux/string_choices.h>
 #include <linux/usb/hcd.h>
 #include <linux/usb.h>
+#include <linux/usb/role.h>
+#include <linux/usb/typec_dp.h>
+#include <linux/usb/typec_mux.h>
+#include <linux/workqueue.h>
 #include "core.h"
 #include "glue.h"
 
@@ -84,7 +89,17 @@ struct dwc3_qcom {
 	struct icc_path		*icc_path_ddr;
 	struct icc_path		*icc_path_apps;
 
-	enum usb_role		current_role;
+	enum usb_role		current_role; /* DWC core role */
+	enum usb_role		connector_role;
+	struct mutex		role_lock;
+
+#if IS_REACHABLE(CONFIG_TYPEC)
+	struct typec_mux_dev	*mode_switch;
+	enum usb_device_speed	default_maximum_speed;
+	bool			dp_only;
+	bool			host_restart_pending;
+	bool			select_utmi_as_pipe_clk;
+#endif
 };
 
 #define to_dwc3_qcom(d) container_of((d), struct dwc3_qcom, dwc)
@@ -436,6 +451,249 @@ static void dwc3_qcom_select_utmi_clk(struct dwc3_qcom *qcom)
 			  PIPE_UTMI_CLK_DIS);
 }
 
+static void __dwc3_qcom_set_role_notifier(struct dwc3_qcom *qcom,
+					  enum usb_role next_role)
+{
+	if (qcom->current_role == next_role)
+		return;
+
+	if (pm_runtime_resume_and_get(qcom->dev)) {
+		dev_dbg(qcom->dev, "Failed to resume device\n");
+		return;
+	}
+
+	if (qcom->current_role == USB_ROLE_DEVICE)
+		dwc3_qcom_vbus_override_enable(qcom, false);
+	else
+		dwc3_qcom_vbus_override_enable(qcom, true);
+
+	pm_runtime_mark_last_busy(qcom->dev);
+	pm_runtime_put_sync(qcom->dev);
+
+	qcom->current_role = next_role;
+}
+
+#if IS_REACHABLE(CONFIG_TYPEC)
+static void dwc3_qcom_select_pipe_clk(struct dwc3_qcom *qcom)
+{
+	dwc3_qcom_setbits(qcom->qscratch_base, QSCRATCH_GENERAL_CFG,
+			  PIPE_UTMI_CLK_DIS);
+
+	usleep_range(100, 1000);
+
+	dwc3_qcom_clrbits(qcom->qscratch_base, QSCRATCH_GENERAL_CFG,
+			  PIPE_UTMI_CLK_SEL | PIPE3_PHYSTATUS_SW);
+
+	usleep_range(100, 1000);
+
+	dwc3_qcom_clrbits(qcom->qscratch_base, QSCRATCH_GENERAL_CFG,
+			  PIPE_UTMI_CLK_DIS);
+}
+
+static u32 dwc3_qcom_role_to_mode(struct dwc3 *dwc, enum usb_role role)
+{
+	if (role == USB_ROLE_HOST ||
+	    (role == USB_ROLE_NONE &&
+	     dwc->role_switch_default_mode == USB_DR_MODE_HOST))
+		return DWC3_GCTL_PRTCAP_HOST;
+
+	return DWC3_GCTL_PRTCAP_DEVICE;
+}
+
+static void __dwc3_qcom_set_role(struct dwc3_qcom *qcom,
+				 enum usb_role next_role)
+{
+	struct dwc3 *dwc = &qcom->dwc;
+
+	__dwc3_qcom_set_role_notifier(qcom, next_role);
+	dwc3_set_mode(dwc, dwc3_qcom_role_to_mode(dwc, next_role));
+}
+
+static int dwc3_qcom_role_switch_set(struct dwc3 *dwc,
+				     enum usb_role next_role)
+{
+	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+
+	/* The connector role remains unchanged during a DP-only core restart. */
+	mutex_lock(&qcom->role_lock);
+	if (qcom->connector_role != next_role) {
+		qcom->connector_role = next_role;
+		__dwc3_qcom_set_role(qcom, next_role);
+	}
+	mutex_unlock(&qcom->role_lock);
+
+	return 0;
+}
+
+static enum usb_role dwc3_qcom_role_switch_get(struct dwc3 *dwc)
+{
+	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+	enum usb_role role;
+
+	mutex_lock(&qcom->role_lock);
+	role = qcom->connector_role;
+	mutex_unlock(&qcom->role_lock);
+
+	return role;
+}
+
+static int dwc3_qcom_restart_host_locked(struct dwc3_qcom *qcom)
+{
+	struct dwc3 *dwc = &qcom->dwc;
+
+	if (!qcom->host_restart_pending)
+		return 0;
+
+	flush_work(&dwc->drd_work);
+
+	/* A connector role change supersedes the saved host state. */
+	if (qcom->connector_role != USB_ROLE_HOST) {
+		qcom->host_restart_pending = false;
+		return 0;
+	}
+
+	__dwc3_qcom_set_role(qcom, USB_ROLE_HOST);
+	flush_work(&dwc->drd_work);
+	if (dwc->current_dr_role != DWC3_GCTL_PRTCAP_HOST)
+		return -EIO;
+
+	qcom->host_restart_pending = false;
+	return 0;
+}
+
+static int dwc3_qcom_set_dp_only(struct dwc3_qcom *qcom, bool dp_only,
+				 bool defer_host_restart)
+{
+	struct dwc3 *dwc = &qcom->dwc;
+	bool restart_host = false;
+	int ret = 0;
+
+	mutex_lock(&qcom->role_lock);
+
+	if (qcom->dp_only == dp_only) {
+		if (!defer_host_restart)
+			ret = dwc3_qcom_restart_host_locked(qcom);
+		goto out_unlock;
+	}
+
+	/* Apply a pending UCSI role change before deciding whether to restart. */
+	flush_work(&dwc->drd_work);
+
+	restart_host = dwc->current_dr_role == DWC3_GCTL_PRTCAP_HOST;
+	if (restart_host) {
+		__dwc3_qcom_set_role(qcom, USB_ROLE_DEVICE);
+		flush_work(&dwc->drd_work);
+		if (dwc->current_dr_role != DWC3_GCTL_PRTCAP_DEVICE) {
+			ret = -EBUSY;
+			goto out_unlock;
+		}
+	}
+
+	if (dp_only) {
+		dwc->maximum_speed = USB_SPEED_HIGH;
+		dwc3_qcom_select_utmi_clk(qcom);
+	} else {
+		dwc->maximum_speed = qcom->default_maximum_speed;
+		if (!qcom->select_utmi_as_pipe_clk)
+			dwc3_qcom_select_pipe_clk(qcom);
+	}
+
+	qcom->dp_only = dp_only;
+	qcom->host_restart_pending |= restart_host;
+
+	if (defer_host_restart)
+		goto out_unlock;
+
+	ret = dwc3_qcom_restart_host_locked(qcom);
+
+out_unlock:
+	mutex_unlock(&qcom->role_lock);
+	return ret;
+}
+
+static int dwc3_qcom_typec_mux_set(struct typec_mux_dev *mux,
+				   struct typec_mux_state *state)
+{
+	struct dwc3_qcom *qcom = typec_mux_get_drvdata(mux);
+	const struct typec_displayport_data *dp_data = state->data;
+	unsigned int svid = state->alt ? state->alt->svid : 0;
+	u8 pin_assign;
+	bool defer_host_restart = false;
+	bool dp_only;
+
+	if (svid == USB_TYPEC_DP_SID) {
+		/* Configure enters SAFE with the target pin assignment in @data. */
+		if (state->mode == TYPEC_STATE_SAFE && dp_data) {
+			pin_assign = DP_CONF_GET_PIN_ASSIGN(dp_data->conf);
+			dp_only = pin_assign == BIT(DP_PIN_ASSIGN_C) ||
+				  pin_assign == BIT(DP_PIN_ASSIGN_E);
+			defer_host_restart = dp_only;
+		} else {
+			dp_only = state->mode == TYPEC_DP_STATE_C ||
+				  state->mode == TYPEC_DP_STATE_E;
+		}
+	} else if (state->mode == TYPEC_STATE_SAFE) {
+		dp_only = false;
+	} else {
+		return 0;
+	}
+
+	if (qcom->dp_only == dp_only &&
+	    (defer_host_restart || !qcom->host_restart_pending))
+		return 0;
+
+	if (defer_host_restart)
+		dev_info(qcom->dev,
+			 "Type-C mode %lu SVID %#x: preparing USB2-only\n",
+			 state->mode, svid);
+	else
+		dev_info(qcom->dev, "Type-C mode %lu SVID %#x: USB2-only %s\n",
+			 state->mode, svid, str_on_off(dp_only));
+
+	return dwc3_qcom_set_dp_only(qcom, dp_only, defer_host_restart);
+}
+
+static int dwc3_qcom_register_typec_mux(struct dwc3_qcom *qcom)
+{
+	struct typec_mux_desc mux_desc = { };
+
+	if (!device_property_read_bool(qcom->dev, "mode-switch"))
+		return 0;
+
+	qcom->default_maximum_speed = qcom->dwc.maximum_speed;
+
+	mux_desc.drvdata = qcom;
+	mux_desc.fwnode = dev_fwnode(qcom->dev);
+	mux_desc.set = dwc3_qcom_typec_mux_set;
+
+	qcom->mode_switch = typec_mux_register(qcom->dev, &mux_desc);
+	if (IS_ERR(qcom->mode_switch))
+		return dev_err_probe(qcom->dev, PTR_ERR(qcom->mode_switch),
+				     "failed to register Type-C mode switch\n");
+	dev_info(qcom->dev, "registered Type-C mode switch for DWC %#x revision %#x\n",
+		 qcom->dwc.ip, qcom->dwc.revision);
+
+	return 0;
+}
+
+static void dwc3_qcom_unregister_typec_mux(struct dwc3_qcom *qcom)
+{
+	if (IS_ERR_OR_NULL(qcom->mode_switch))
+		return;
+
+	typec_mux_unregister(qcom->mode_switch);
+}
+#else
+static int dwc3_qcom_register_typec_mux(struct dwc3_qcom *qcom)
+{
+	return 0;
+}
+
+static void dwc3_qcom_unregister_typec_mux(struct dwc3_qcom *qcom)
+{
+}
+#endif
+
 static int dwc3_qcom_request_irq(struct dwc3_qcom *qcom, int irq,
 				 const char *name)
 {
@@ -562,27 +820,9 @@ static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_rol
 {
 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
 
-	if (qcom->current_role == next_role)
-		return;
-
-	if (pm_runtime_resume_and_get(qcom->dev)) {
-		dev_dbg(qcom->dev, "Failed to resume device\n");
-		return;
-	}
-
-	if (qcom->current_role == USB_ROLE_DEVICE)
-		dwc3_qcom_vbus_override_enable(qcom, false);
-	else if (qcom->current_role != USB_ROLE_DEVICE)
-		dwc3_qcom_vbus_override_enable(qcom, true);
-
-	pm_runtime_mark_last_busy(qcom->dev);
-	pm_runtime_put_sync(qcom->dev);
-
-	/*
-	 * Current role changes via usb_role_switch_set_role callback protected
-	 * internally by mutex lock.
-	 */
-	qcom->current_role = next_role;
+	mutex_lock(&qcom->role_lock);
+	__dwc3_qcom_set_role_notifier(qcom, next_role);
+	mutex_unlock(&qcom->role_lock);
 }
 
 static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
@@ -603,6 +843,10 @@ static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
 }
 
 struct dwc3_glue_ops dwc3_qcom_glue_ops = {
+#if IS_REACHABLE(CONFIG_TYPEC)
+	.role_switch_set = dwc3_qcom_role_switch_set,
+	.role_switch_get = dwc3_qcom_role_switch_get,
+#endif
 	.pre_set_role	= dwc3_qcom_set_role_notifier,
 	.pre_run_stop	= dwc3_qcom_run_stop_notifier,
 };
@@ -623,6 +867,7 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	qcom->dev = &pdev->dev;
+	mutex_init(&qcom->role_lock);
 
 	qcom->resets = devm_reset_control_array_get_optional_exclusive(dev);
 	if (IS_ERR(qcom->resets)) {
@@ -680,6 +925,9 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 	 */
 	ignore_pipe_clk = device_property_read_bool(dev,
 				"qcom,select-utmi-as-pipe-clk");
+#if IS_REACHABLE(CONFIG_TYPEC)
+	qcom->select_utmi_as_pipe_clk = ignore_pipe_clk;
+#endif
 	if (ignore_pipe_clk)
 		dwc3_qcom_select_utmi_clk(qcom);
 
@@ -697,6 +945,7 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 		else
 			qcom->current_role = USB_ROLE_DEVICE;
 	}
+	qcom->connector_role = qcom->current_role;
 
 	qcom->dwc.glue_ops = &dwc3_qcom_glue_ops;
 
@@ -720,8 +969,14 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 
 	qcom->is_suspended = false;
 
+	ret = dwc3_qcom_register_typec_mux(qcom);
+	if (ret)
+		goto interconnect_exit;
+
 	return 0;
 
+interconnect_exit:
+	dwc3_qcom_interconnect_exit(qcom);
 remove_core:
 	dwc3_core_remove(&qcom->dwc);
 clk_disable:
@@ -734,6 +989,8 @@ static void dwc3_qcom_remove(struct platform_device *pdev)
 {
 	struct dwc3 *dwc = platform_get_drvdata(pdev);
 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+
+	dwc3_qcom_unregister_typec_mux(qcom);
 
 	if (pm_runtime_resume_and_get(qcom->dev) < 0)
 		return;
