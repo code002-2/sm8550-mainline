@@ -57,6 +57,13 @@
 #define DP_INTERRUPT_STATUS2_MASK \
 	(DP_INTERRUPT_STATUS2 << DP_INTERRUPT_STATUS_MASK_SHIFT)
 
+#define DP_INTERRUPT_STATUS5 \
+	(DP_INTR_MST_DP0_VCPF_SENT | DP_INTR_MST_DP1_VCPF_SENT)
+#define DP_INTERRUPT_STATUS5_ACK \
+	(DP_INTERRUPT_STATUS5 << DP_INTERRUPT_STATUS_ACK_SHIFT)
+#define DP_INTERRUPT_STATUS5_MASK \
+	(DP_INTERRUPT_STATUS5 << DP_INTERRUPT_STATUS_MASK_SHIFT)
+
 #define DP_INTERRUPT_STATUS4 \
 	(PSR_UPDATE_INT | PSR_CAPTURE_INT | PSR_EXIT_INT | \
 	PSR_UPDATE_ERROR_INT | PSR_WAKE_ERROR_INT)
@@ -143,6 +150,8 @@ struct msm_dp_ctrl_private {
 
 	bool core_clks_on;
 	bool link_clks_on;
+	bool mst_supported;
+	bool mst_mode;
 	bool stream_clks_on[MSM_DP_STREAM_MAX];
 	struct {
 		u32 start_slot;
@@ -260,6 +269,20 @@ static u32 msm_dp_ctrl_get_interrupt(struct msm_dp_ctrl_private *ctrl)
 	return intr;
 }
 
+static u32 msm_dp_ctrl_get_mst_interrupt(struct msm_dp_ctrl_private *ctrl)
+{
+	u32 intr, intr_ack;
+
+	intr = msm_dp_read_ahb(ctrl, REG_DP_INTR_STATUS5);
+	intr &= ~DP_INTERRUPT_STATUS5_MASK;
+	intr_ack = (intr & DP_INTERRUPT_STATUS5)
+			<< DP_INTERRUPT_STATUS_ACK_SHIFT;
+	msm_dp_write_ahb(ctrl, REG_DP_INTR_STATUS5,
+			 intr_ack | DP_INTERRUPT_STATUS5_MASK);
+
+	return intr;
+}
+
 void msm_dp_ctrl_enable_irq(struct msm_dp_ctrl *msm_dp_ctrl)
 {
 	struct msm_dp_ctrl_private *ctrl =
@@ -269,6 +292,9 @@ void msm_dp_ctrl_enable_irq(struct msm_dp_ctrl *msm_dp_ctrl)
 			DP_INTERRUPT_STATUS1_MASK);
 	msm_dp_write_ahb(ctrl, REG_DP_INTR_STATUS2,
 			DP_INTERRUPT_STATUS2_MASK);
+	if (ctrl->mst_supported && ctrl->pixel_clks[MSM_DP_STREAM_1])
+		msm_dp_write_ahb(ctrl, REG_DP_INTR_STATUS5,
+				 DP_INTERRUPT_STATUS5_MASK);
 }
 
 void msm_dp_ctrl_disable_irq(struct msm_dp_ctrl *msm_dp_ctrl)
@@ -278,6 +304,8 @@ void msm_dp_ctrl_disable_irq(struct msm_dp_ctrl *msm_dp_ctrl)
 
 	msm_dp_write_ahb(ctrl, REG_DP_INTR_STATUS, 0x00);
 	msm_dp_write_ahb(ctrl, REG_DP_INTR_STATUS2, 0x00);
+	if (ctrl->mst_supported && ctrl->pixel_clks[MSM_DP_STREAM_1])
+		msm_dp_write_ahb(ctrl, REG_DP_INTR_STATUS5, 0x00);
 }
 
 static u32 msm_dp_ctrl_get_psr_interrupt(struct msm_dp_ctrl_private *ctrl)
@@ -431,7 +459,8 @@ static void msm_dp_ctrl_config_ctrl(struct msm_dp_ctrl_private *ctrl,
 	config |= DP_CONFIGURATION_CTRL_STATIC_DYNAMIC_CN;
 	config |= DP_CONFIGURATION_CTRL_SYNC_ASYNC_CLK;
 
-	if (panel->psr_cap.version)
+	if (!ctrl->mst_mode && stream_id == MSM_DP_STREAM_0 &&
+	    panel->psr_cap.version)
 		config |= DP_CONFIGURATION_CTRL_SEND_VSC;
 
 	drm_dbg_dp(ctrl->drm_dev, "DP_CONFIGURATION_CTRL=0x%x\n", config);
@@ -485,8 +514,7 @@ static void msm_dp_ctrl_configure_source_params(struct msm_dp_ctrl_private *ctrl
 	msm_dp_write_link(ctrl, stream_id == MSM_DP_STREAM_1 ?
 			   REG_DP1_MISC1_MISC0 : REG_DP_MISC1_MISC0, misc_val);
 
-	msm_dp_panel_timing_cfg(panel, ctrl->msm_dp_ctrl.wide_bus_en,
-				stream_id);
+	msm_dp_panel_timing_cfg(panel, panel->wide_bus_en);
 }
 
 /*
@@ -1281,8 +1309,7 @@ static void msm_dp_ctrl_calc_tu_parameters(struct msm_dp_ctrl_private *ctrl,
 }
 
 static void msm_dp_ctrl_setup_tr_unit(struct msm_dp_ctrl_private *ctrl,
-				      struct msm_dp_panel *panel,
-				      enum msm_dp_stream_id stream_id)
+				      struct msm_dp_panel *panel)
 {
 	u32 msm_dp_tu = 0x0;
 	u32 valid_boundary = 0x0;
@@ -1318,8 +1345,8 @@ void msm_dp_ctrl_set_mst_channel_info(struct msm_dp_ctrl *msm_dp_ctrl,
 						struct msm_dp_ctrl_private,
 						msm_dp_ctrl);
 
-	if (stream_id >= MSM_DP_STREAM_MAX || start_slot > 63 ||
-	    start_slot + num_slots > 64)
+	if (stream_id >= MSM_DP_STREAM_MAX || (!start_slot && num_slots) ||
+	    start_slot > 63 || num_slots > 64 - start_slot)
 		return;
 
 	ctrl->mst_channel[stream_id].start_slot = start_slot;
@@ -1358,31 +1385,47 @@ static void msm_dp_ctrl_program_mst_rg(struct msm_dp_ctrl_private *ctrl,
 				       enum msm_dp_stream_id stream_id,
 				       int pbn)
 {
-	u64 min_slots, max_slots, target_slots, target_symbols;
-	u64 symbols_per_slot, fraction_scale;
-	u64 numerator, denominator, integer, fraction;
-	u32 x_int, y_frac_enum, lane_count;
+	u64 min_slots, max_slots, raw_target_sc, target_sc;
+	u64 slot_denom, slot_enum, slot_int;
+	u64 target_symbols, integer, fraction;
+	u64 numerator, denominator;
+	u32 lane_count;
+	u32 x_int, y_frac_enum;
 
 	numerator = (u64)panel->msm_dp_mode.drm_mode.clock *
-		    panel->msm_dp_mode.bpp * 64;
+		    panel->msm_dp_mode.bpp * 64 * 1000;
 	denominator = (u64)ctrl->link->link_params.rate *
-		      ctrl->link->link_params.num_lanes * 8;
+		      ctrl->link->link_params.num_lanes * 8 * 1000;
 	min_slots = drm_fixp_from_fraction(numerator, denominator);
 
 	numerator = (u64)pbn * 54 * 1000;
 	denominator = (u64)ctrl->link->link_params.rate *
 		      ctrl->link->link_params.num_lanes;
 	max_slots = drm_fixp_from_fraction(numerator, denominator);
-	target_slots = drm_fixp_div(min_slots + max_slots,
-				    drm_fixp_from_fraction(2, 1));
+	raw_target_sc = drm_fixp_div(min_slots + max_slots,
+				     drm_fixp_from_fraction(2, 1));
+
+	/* Preserve the vendor's fixed-point truncation before the final ceiling. */
 	lane_count = ctrl->link->link_params.num_lanes;
-	symbols_per_slot = drm_fixp_from_fraction(lane_count, 1);
-	target_symbols = drm_fixp_mul(target_slots, symbols_per_slot);
+	slot_denom = drm_fixp_from_fraction(256 * lane_count, 1);
+	target_sc = drm_fixp_div(drm_fixp_mul(raw_target_sc, slot_denom),
+				 slot_denom);
+	slot_int = drm_fixp2int(target_sc);
+	slot_enum = 256 * lane_count;
+	if (drm_fixp2int_ceil(raw_target_sc) != slot_int) {
+		integer = drm_fixp_from_fraction(slot_int, 1);
+		slot_enum = drm_fixp2int(drm_fixp_mul(raw_target_sc - integer, slot_denom));
+	}
+
+	target_symbols = drm_fixp_mul(drm_fixp_from_fraction(slot_int, 1) +
+					drm_fixp_from_fraction(slot_enum,
+							       drm_fixp2int(slot_denom)),
+					drm_fixp_from_fraction(lane_count, 1));
 
 	x_int = drm_fixp2int(target_symbols);
 	integer = drm_fixp_from_fraction(x_int, 1);
-	fraction_scale = drm_fixp_from_fraction(256, 1);
-	fraction = drm_fixp_mul(target_symbols - integer, fraction_scale);
+	fraction = drm_fixp_mul(target_symbols - integer,
+				drm_fixp_from_fraction(256, 1));
 	y_frac_enum = drm_fixp2int_ceil(fraction);
 
 	msm_dp_write_link(ctrl, stream_id == MSM_DP_STREAM_1 ?
@@ -1390,14 +1433,16 @@ static void msm_dp_ctrl_program_mst_rg(struct msm_dp_ctrl_private *ctrl,
 			   y_frac_enum | (x_int << 16));
 }
 
-void msm_dp_ctrl_set_mst(struct msm_dp_ctrl *msm_dp_ctrl, bool enable)
+static void msm_dp_ctrl_apply_mst(struct msm_dp_ctrl_private *ctrl)
 {
-	struct msm_dp_ctrl_private *ctrl = container_of(msm_dp_ctrl,
-						struct msm_dp_ctrl_private,
-						msm_dp_ctrl);
-	u32 reg = msm_dp_read_link(ctrl, REG_DP_MAINLINK_CTRL);
+	u32 reg;
 
-	if (enable)
+	if (!ctrl->mst_supported)
+		return;
+
+	reg = msm_dp_read_link(ctrl, REG_DP_MAINLINK_CTRL);
+
+	if (ctrl->mst_mode)
 		reg |= DP_MAINLINK_CTRL_MST_ENABLE;
 	else
 		reg &= ~DP_MAINLINK_CTRL_MST_ENABLE;
@@ -1405,18 +1450,59 @@ void msm_dp_ctrl_set_mst(struct msm_dp_ctrl *msm_dp_ctrl, bool enable)
 	msm_dp_write_link(ctrl, REG_DP_MAINLINK_CTRL, reg);
 }
 
-int msm_dp_ctrl_mst_send_act(struct msm_dp_ctrl *msm_dp_ctrl)
+void msm_dp_ctrl_set_mst(struct msm_dp_ctrl *msm_dp_ctrl, bool enable)
+{
+	struct msm_dp_ctrl_private *ctrl = container_of(msm_dp_ctrl,
+						struct msm_dp_ctrl_private,
+						msm_dp_ctrl);
+
+	ctrl->mst_mode = ctrl->mst_supported && enable;
+	if (!enable)
+		memset(ctrl->mst_channel, 0, sizeof(ctrl->mst_channel));
+
+	if (ctrl->link_clks_on)
+		msm_dp_ctrl_apply_mst(ctrl);
+}
+
+bool msm_dp_ctrl_mst_supported(struct msm_dp_ctrl *msm_dp_ctrl)
+{
+	struct msm_dp_ctrl_private *ctrl = container_of(msm_dp_ctrl,
+						struct msm_dp_ctrl_private,
+						msm_dp_ctrl);
+
+	return ctrl->mst_supported && !!ctrl->pixel_clks[MSM_DP_STREAM_1];
+}
+
+static void msm_dp_ctrl_mst_send_act(struct msm_dp_ctrl *msm_dp_ctrl)
 {
 	struct msm_dp_ctrl_private *ctrl = container_of(msm_dp_ctrl,
 						struct msm_dp_ctrl_private,
 						msm_dp_ctrl);
 	u32 act;
 
+	if (!ctrl->mst_mode)
+		return;
+
 	msm_dp_write_link(ctrl, REG_DP_MST_ACT, 1);
 	msleep(20);
 	act = msm_dp_read_link(ctrl, REG_DP_MST_ACT);
+	if (act)
+		drm_warn(ctrl->drm_dev, "MST source ACT timed out\n");
+	else
+		drm_dbg_dp(ctrl->drm_dev, "MST source ACT complete\n");
+}
 
-	return act ? -ETIMEDOUT : 0;
+void msm_dp_ctrl_mst_update_payload(struct msm_dp_ctrl *msm_dp_ctrl)
+{
+	struct msm_dp_ctrl_private *ctrl = container_of(msm_dp_ctrl,
+						struct msm_dp_ctrl_private,
+						msm_dp_ctrl);
+
+	if (!ctrl->mst_mode)
+		return;
+
+	msm_dp_ctrl_program_mst_channels(ctrl);
+	msm_dp_ctrl_mst_send_act(msm_dp_ctrl);
 }
 
 static int msm_dp_ctrl_wait4video_ready(struct msm_dp_ctrl_private *ctrl)
@@ -1811,6 +1897,7 @@ static int msm_dp_ctrl_setup_main_link(struct msm_dp_ctrl_private *ctrl,
 {
 	int ret = 0;
 
+	msm_dp_ctrl_apply_mst(ctrl);
 	msm_dp_ctrl_mainlink_enable(ctrl);
 
 	if (ctrl->link->sink_request & DP_TEST_LINK_PHY_TEST_PATTERN)
@@ -2129,8 +2216,11 @@ static int msm_dp_ctrl_link_maintenance(struct msm_dp_ctrl_private *ctrl)
 {
 	int ret = 0;
 	int training_step = DP_TRAINING_NONE;
+	bool mst_stream_active;
 
-	msm_dp_ctrl_push_idle(&ctrl->msm_dp_ctrl);
+	/* The vendor MST path retrains the shared link without SST idle. */
+	if (!ctrl->mst_mode)
+		msm_dp_ctrl_push_idle(&ctrl->msm_dp_ctrl);
 
 	ctrl->link->phy_params.p_level = 0;
 	ctrl->link->phy_params.v_level = 0;
@@ -2141,7 +2231,20 @@ static int msm_dp_ctrl_link_maintenance(struct msm_dp_ctrl_private *ctrl)
 
 	msm_dp_ctrl_clear_training_pattern(ctrl, DP_PHY_DPRX);
 
+	mst_stream_active = ctrl->stream_clks_on[MSM_DP_STREAM_0] ||
+				ctrl->stream_clks_on[MSM_DP_STREAM_1];
+	if (ctrl->mst_mode && !mst_stream_active)
+		goto end;
+
 	msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, DP_STATE_CTRL_SEND_VIDEO);
+
+	if (ctrl->mst_mode) {
+		msm_dp_ctrl_mst_send_act(&ctrl->msm_dp_ctrl);
+		if (!msm_dp_ctrl_wait4video_ready(ctrl))
+			return 0;
+		drm_warn(ctrl->drm_dev, "MST video-ready timed out during link maintenance\n");
+		return 0;
+	}
 
 	ret = msm_dp_ctrl_wait4video_ready(ctrl);
 end:
@@ -2503,10 +2606,11 @@ int msm_dp_ctrl_on_link(struct msm_dp_ctrl *msm_dp_ctrl)
 
 	if (rc == 0) {  /* link train successfully */
 		/*
-		 * do not stop train pattern here
-		 * stop link training at on_stream
-		 * to pass compliance test
+		 * SST defers this to on_stream() for compliance tests. MST needs a
+		 * normal link before topology discovery starts over AUX.
 		 */
+		if (ctrl->mst_mode)
+			msm_dp_ctrl_clear_training_pattern(ctrl, DP_PHY_DPRX);
 	} else  {
 		/*
 		 * link training failed
@@ -2673,7 +2777,7 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, bool force_link_train
 
 	msm_dp_panel_clear_dsc_dto(ctrl->panel);
 
-	msm_dp_ctrl_setup_tr_unit(ctrl, ctrl->panel, MSM_DP_STREAM_0);
+	msm_dp_ctrl_setup_tr_unit(ctrl, ctrl->panel);
 
 	msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, DP_STATE_CTRL_SEND_VIDEO);
 
@@ -2704,22 +2808,22 @@ int msm_dp_ctrl_on_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
 	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
 	if (!ctrl->pixel_clks[stream_id])
 		return -ENODEV;
+	if (ctrl->stream_clks_on[stream_id])
+		return -EBUSY;
 
 	pixel_rate_orig = panel->msm_dp_mode.drm_mode.clock;
 	pixel_rate = pixel_rate_orig;
-	if (msm_dp_ctrl->wide_bus_en || panel->msm_dp_mode.out_fmt_is_yuv_420)
+	if (panel->wide_bus_en || panel->msm_dp_mode.out_fmt_is_yuv_420)
 		pixel_rate >>= 1;
 
 	ret = clk_set_rate(ctrl->pixel_clks[stream_id], pixel_rate * 1000);
 	if (ret)
 		return ret;
 
-	if (!ctrl->stream_clks_on[stream_id]) {
-		ret = clk_prepare_enable(ctrl->pixel_clks[stream_id]);
-		if (ret)
-			return ret;
-		ctrl->stream_clks_on[stream_id] = true;
-	}
+	ret = clk_prepare_enable(ctrl->pixel_clks[stream_id]);
+	if (ret)
+		return ret;
+	ctrl->stream_clks_on[stream_id] = true;
 
 	reinit_completion(&ctrl->video_comp);
 	msm_dp_ctrl_configure_source_params(ctrl, panel, stream_id);
@@ -2727,17 +2831,38 @@ int msm_dp_ctrl_on_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
 			       pixel_rate_orig,
 			       panel->msm_dp_mode.out_fmt_is_yuv_420);
 	msm_dp_panel_clear_dsc_dto(panel);
-	msm_dp_ctrl_setup_tr_unit(ctrl, panel, stream_id);
+	/* Sheng has one shared TU block, programmed by stream 0 only. */
+	if (stream_id == MSM_DP_STREAM_0)
+		msm_dp_ctrl_setup_tr_unit(ctrl, panel);
 	msm_dp_ctrl_program_mst_channels(ctrl);
 	msm_dp_ctrl_program_mst_rg(ctrl, panel, stream_id, pbn);
 	msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, DP_STATE_CTRL_SEND_VIDEO);
 
-	return msm_dp_ctrl_wait4video_ready(ctrl);
+	msm_dp_ctrl_mst_send_act(msm_dp_ctrl);
+
+	ret = msm_dp_ctrl_wait4video_ready(ctrl);
+	if (!ret)
+		return 0;
+
+	reinit_completion(&ctrl->idle_comp);
+	msm_dp_write_link(ctrl, REG_DP_STATE_CTRL,
+			  stream_id == MSM_DP_STREAM_1 ?
+			  DP_STATE_CTRL_MST_STREAM_1_IDLE :
+			  DP_STATE_CTRL_MST_STREAM_0_IDLE);
+	if (!wait_for_completion_timeout(&ctrl->idle_comp,
+					 IDLE_PATTERN_COMPLETION_TIMEOUT_JIFFIES))
+		drm_warn(ctrl->drm_dev, "MST stream %u idle timed out\n",
+			 stream_id);
+	msm_dp_panel_ack_dsc_dto(panel);
+	clk_disable_unprepare(ctrl->pixel_clks[stream_id]);
+	ctrl->stream_clks_on[stream_id] = false;
+
+	return ret;
 }
 
-void msm_dp_ctrl_off_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
-				struct msm_dp_panel *panel,
-				enum msm_dp_stream_id stream_id)
+void msm_dp_ctrl_mst_stream_pre_off(struct msm_dp_ctrl *msm_dp_ctrl,
+				    struct msm_dp_panel *panel,
+				    enum msm_dp_stream_id stream_id)
 {
 	struct msm_dp_ctrl_private *ctrl;
 	u32 state;
@@ -2756,7 +2881,22 @@ void msm_dp_ctrl_off_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
 		drm_warn(ctrl->drm_dev, "MST stream %u idle timed out\n",
 			 stream_id);
 
+	msm_dp_ctrl_mst_update_payload(msm_dp_ctrl);
+}
+
+void msm_dp_ctrl_off_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
+				struct msm_dp_panel *panel,
+				enum msm_dp_stream_id stream_id)
+{
+	struct msm_dp_ctrl_private *ctrl;
+
+	if (!msm_dp_ctrl || !panel || stream_id >= MSM_DP_STREAM_MAX)
+		return;
+
+	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
+
 	if (ctrl->stream_clks_on[stream_id]) {
+		msm_dp_panel_ack_dsc_dto(panel);
 		clk_disable_unprepare(ctrl->pixel_clks[stream_id]);
 		ctrl->stream_clks_on[stream_id] = false;
 	}
@@ -2766,6 +2906,7 @@ void msm_dp_ctrl_off_link_stream(struct msm_dp_ctrl *msm_dp_ctrl)
 {
 	struct msm_dp_ctrl_private *ctrl;
 	struct phy *phy;
+	int stream_id;
 
 	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
 	phy = ctrl->phy;
@@ -2777,9 +2918,12 @@ void msm_dp_ctrl_off_link_stream(struct msm_dp_ctrl *msm_dp_ctrl)
 
 	msm_dp_ctrl_mainlink_disable(ctrl);
 
-	if (ctrl->stream_clks_on[MSM_DP_STREAM_0]) {
-		clk_disable_unprepare(ctrl->pixel_clks[MSM_DP_STREAM_0]);
-		ctrl->stream_clks_on[MSM_DP_STREAM_0] = false;
+	for (stream_id = 0; stream_id < MSM_DP_STREAM_MAX; stream_id++) {
+		if (!ctrl->stream_clks_on[stream_id])
+			continue;
+
+		clk_disable_unprepare(ctrl->pixel_clks[stream_id]);
+		ctrl->stream_clks_on[stream_id] = false;
 	}
 
 	dev_pm_opp_set_rate(ctrl->dev, 0);
@@ -2812,6 +2956,7 @@ void msm_dp_ctrl_off(struct msm_dp_ctrl *msm_dp_ctrl)
 {
 	struct msm_dp_ctrl_private *ctrl;
 	struct phy *phy;
+	int stream_id;
 
 	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
 	phy = ctrl->phy;
@@ -2822,10 +2967,15 @@ void msm_dp_ctrl_off(struct msm_dp_ctrl *msm_dp_ctrl)
 
 	msm_dp_ctrl_reset(&ctrl->msm_dp_ctrl);
 
-	if (ctrl->stream_clks_on[MSM_DP_STREAM_0]) {
-		clk_disable_unprepare(ctrl->pixel_clks[MSM_DP_STREAM_0]);
-		ctrl->stream_clks_on[MSM_DP_STREAM_0] = false;
+	for (stream_id = 0; stream_id < MSM_DP_STREAM_MAX; stream_id++) {
+		if (!ctrl->stream_clks_on[stream_id])
+			continue;
+
+		clk_disable_unprepare(ctrl->pixel_clks[stream_id]);
+		ctrl->stream_clks_on[stream_id] = false;
 	}
+	ctrl->mst_mode = false;
+	memset(ctrl->mst_channel, 0, sizeof(ctrl->mst_channel));
 
 	dev_pm_opp_set_rate(ctrl->dev, 0);
 	msm_dp_ctrl_link_clk_disable(&ctrl->msm_dp_ctrl);
@@ -2872,6 +3022,16 @@ irqreturn_t msm_dp_ctrl_isr(struct msm_dp_ctrl *msm_dp_ctrl)
 		drm_dbg_dp(ctrl->drm_dev, "idle_patterns_sent\n");
 		complete(&ctrl->idle_comp);
 		ret = IRQ_HANDLED;
+	}
+
+	if (ctrl->mst_supported && ctrl->pixel_clks[MSM_DP_STREAM_1]) {
+		isr = msm_dp_ctrl_get_mst_interrupt(ctrl);
+		if (isr & (DP_INTR_MST_DP0_VCPF_SENT |
+			   DP_INTR_MST_DP1_VCPF_SENT)) {
+			drm_dbg_dp(ctrl->drm_dev, "MST VCPF sent\n");
+			complete(&ctrl->idle_comp);
+			ret = IRQ_HANDLED;
+		}
 	}
 
 	/* DP aux isr */
@@ -2929,19 +3089,22 @@ static int msm_dp_ctrl_clk_init(struct msm_dp_ctrl *msm_dp_ctrl)
 	if (IS_ERR(ctrl->pixel_clks[MSM_DP_STREAM_0]))
 		return PTR_ERR(ctrl->pixel_clks[MSM_DP_STREAM_0]);
 
-	ctrl->pixel_clks[MSM_DP_STREAM_1] =
-		devm_clk_get_optional(dev, "stream_1_pixel");
-	if (IS_ERR(ctrl->pixel_clks[MSM_DP_STREAM_1]))
-		return PTR_ERR(ctrl->pixel_clks[MSM_DP_STREAM_1]);
+	if (ctrl->mst_supported) {
+		ctrl->pixel_clks[MSM_DP_STREAM_1] =
+			devm_clk_get_optional(dev, "stream_1_pixel");
+		if (IS_ERR(ctrl->pixel_clks[MSM_DP_STREAM_1]))
+			return PTR_ERR(ctrl->pixel_clks[MSM_DP_STREAM_1]);
+	}
 
 	return 0;
 }
 
 struct msm_dp_ctrl *msm_dp_ctrl_get(struct device *dev, struct msm_dp_link *link,
 			struct msm_dp_panel *panel,	struct drm_dp_aux *aux,
-			struct phy *phy,
-			void __iomem *ahb_base,
-			void __iomem *link_base)
+				struct phy *phy,
+				void __iomem *ahb_base,
+				void __iomem *link_base,
+				bool mst_supported)
 {
 	struct msm_dp_ctrl_private *ctrl;
 	int ret;
@@ -2981,6 +3144,7 @@ struct msm_dp_ctrl *msm_dp_ctrl_get(struct device *dev, struct msm_dp_link *link
 	ctrl->phy      = phy;
 	ctrl->ahb_base = ahb_base;
 	ctrl->link_base = link_base;
+	ctrl->mst_supported = mst_supported;
 
 	ret = msm_dp_ctrl_clk_init(&ctrl->msm_dp_ctrl);
 	if (ret) {

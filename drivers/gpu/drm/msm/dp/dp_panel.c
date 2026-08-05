@@ -8,6 +8,7 @@
 #include "dp_utils.h"
 
 #include <drm/drm_connector.h>
+#include <drm/display/drm_dp_mst_helper.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_of.h>
 #include <drm/drm_print.h>
@@ -240,7 +241,7 @@ static u32 msm_dp_panel_get_supported_bpp(struct msm_dp_panel *msm_dp_panel,
 }
 
 int msm_dp_panel_read_sink_caps(struct msm_dp_panel *msm_dp_panel,
-	struct drm_connector *connector)
+	struct drm_connector *connector, bool mst_supported)
 {
 	int rc, bw_code;
 	int count;
@@ -280,6 +281,14 @@ int msm_dp_panel_read_sink_caps(struct msm_dp_panel *msm_dp_panel,
 					 msm_dp_panel->downstream_ports);
 	if (rc)
 		return rc;
+
+	if (mst_supported &&
+	    drm_dp_read_mst_cap(panel->aux, msm_dp_panel->dpcd) == DRM_DP_MST) {
+		drm_edid_free(msm_dp_panel->drm_edid);
+		msm_dp_panel->drm_edid = NULL;
+		drm_edid_connector_update(connector, NULL);
+		return 0;
+	}
 
 	drm_edid_free(msm_dp_panel->drm_edid);
 
@@ -481,6 +490,14 @@ void msm_dp_panel_clear_dsc_dto(struct msm_dp_panel *msm_dp_panel)
 	msm_dp_write_p0(panel, MMSS_DP_DSC_DTO, 0x0);
 }
 
+void msm_dp_panel_ack_dsc_dto(struct msm_dp_panel *msm_dp_panel)
+{
+	struct msm_dp_panel_private *panel =
+		container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
+
+	msm_dp_write_p0(panel, MMSS_DP_DSC_DTO, BIT(1));
+}
+
 static void msm_dp_panel_send_vsc_sdp(struct msm_dp_panel_private *panel, struct dp_sdp *vsc_sdp)
 {
 	u32 header[2];
@@ -609,8 +626,7 @@ static int msm_dp_panel_setup_vsc_sdp_yuv_420(struct msm_dp_panel *msm_dp_panel)
 	return 0;
 }
 
-int msm_dp_panel_timing_cfg(struct msm_dp_panel *msm_dp_panel, bool wide_bus_en,
-			    enum msm_dp_stream_id stream_id)
+int msm_dp_panel_timing_cfg(struct msm_dp_panel *msm_dp_panel, bool wide_bus_en)
 {
 	u32 data, total_ver, total_hor;
 	struct msm_dp_panel_private *panel;
@@ -664,17 +680,18 @@ int msm_dp_panel_timing_cfg(struct msm_dp_panel *msm_dp_panel, bool wide_bus_en,
 
 	msm_dp_active = data;
 
-	reg = msm_dp_panel_link_offset(stream_id, REG_DP_TOTAL_HOR_VER,
+	reg = msm_dp_panel_link_offset(panel->stream_id, REG_DP_TOTAL_HOR_VER,
 				       REG_DP1_TOTAL_HOR_VER);
 	msm_dp_write_link(panel, reg, total);
-	reg = msm_dp_panel_link_offset(stream_id, REG_DP_START_HOR_VER_FROM_SYNC,
+	reg = msm_dp_panel_link_offset(panel->stream_id,
+				       REG_DP_START_HOR_VER_FROM_SYNC,
 				       REG_DP1_START_HOR_VER_FROM_SYNC);
 	msm_dp_write_link(panel, reg, sync_start);
-	reg = msm_dp_panel_link_offset(stream_id,
+	reg = msm_dp_panel_link_offset(panel->stream_id,
 				       REG_DP_HSYNC_VSYNC_WIDTH_POLARITY,
 				       REG_DP1_HSYNC_VSYNC_WIDTH_POLARITY);
 	msm_dp_write_link(panel, reg, width_blanking);
-	reg = msm_dp_panel_link_offset(stream_id, REG_DP_ACTIVE_HOR_VER,
+	reg = msm_dp_panel_link_offset(panel->stream_id, REG_DP_ACTIVE_HOR_VER,
 				       REG_DP1_ACTIVE_HOR_VER);
 	msm_dp_write_link(panel, reg, msm_dp_active);
 

@@ -21,14 +21,18 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, bool force_link_train
 int msm_dp_ctrl_on_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
 			      struct msm_dp_panel *panel,
 			      enum msm_dp_stream_id stream_id, int pbn);
+void msm_dp_ctrl_mst_stream_pre_off(struct msm_dp_ctrl *msm_dp_ctrl,
+				    struct msm_dp_panel *panel,
+				    enum msm_dp_stream_id stream_id);
 void msm_dp_ctrl_off_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
 				struct msm_dp_panel *panel,
 				enum msm_dp_stream_id stream_id);
 void msm_dp_ctrl_set_mst(struct msm_dp_ctrl *msm_dp_ctrl, bool enable);
+bool msm_dp_ctrl_mst_supported(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_set_mst_channel_info(struct msm_dp_ctrl *msm_dp_ctrl,
 				      enum msm_dp_stream_id stream_id,
 				      u32 start_slot, u32 num_slots);
-int msm_dp_ctrl_mst_send_act(struct msm_dp_ctrl *msm_dp_ctrl);
+void msm_dp_ctrl_mst_update_payload(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_off_link_stream(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_off_link(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_off(struct msm_dp_ctrl *msm_dp_ctrl);
@@ -41,7 +45,8 @@ struct msm_dp_ctrl *msm_dp_ctrl_get(struct device *dev,
 				    struct drm_dp_aux *aux,
 				    struct phy *phy,
 				    void __iomem *ahb_base,
-				    void __iomem *link_base);
+				    void __iomem *link_base,
+				    bool mst_supported);
 
 void msm_dp_ctrl_reset(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_phy_init(struct msm_dp_ctrl *msm_dp_ctrl);
