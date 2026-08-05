@@ -122,6 +122,9 @@ struct msm_dp_display_private {
 
 	void __iomem *p0_base;
 	size_t p0_len;
+
+	void __iomem *p1_base;
+	size_t p1_len;
 };
 
 struct msm_dp_desc {
@@ -793,7 +796,8 @@ static int msm_dp_init_sub_modules(struct msm_dp_display_private *dp)
 		goto error_link;
 	}
 
-	dp->panel = msm_dp_panel_get(dev, dp->aux, dp->link, dp->link_base, dp->p0_base);
+	dp->panel = msm_dp_panel_get(dev, dp->aux, dp->link, dp->link_base,
+				     dp->p0_base, dp->p1_base);
 	if (IS_ERR(dp->panel)) {
 		rc = PTR_ERR(dp->panel);
 		DRM_ERROR("failed to initialize panel, rc = %d\n", rc);
@@ -1356,6 +1360,17 @@ static int msm_dp_display_get_io(struct msm_dp_display_private *display)
 	if (IS_ERR(display->p0_base)) {
 		DRM_ERROR("unable to remap p0 region: %pe\n", display->p0_base);
 		return PTR_ERR(display->p0_base);
+	}
+
+	display->p1_base = msm_dp_ioremap(pdev, 4, &display->p1_len);
+	if (IS_ERR(display->p1_base)) {
+		if (display->p1_base != ERR_PTR(-EINVAL)) {
+			DRM_ERROR("unable to remap p1 region: %pe\n", display->p1_base);
+			return PTR_ERR(display->p1_base);
+		}
+
+		display->p1_base = NULL;
+		display->p1_len = 0;
 	}
 
 	return 0;

@@ -14,6 +14,12 @@
 
 struct edid;
 
+enum msm_dp_stream_id {
+	MSM_DP_STREAM_0,
+	MSM_DP_STREAM_1,
+	MSM_DP_STREAM_MAX,
+};
+
 struct msm_dp_display_mode {
 	struct drm_display_mode drm_mode;
 	u32 bpp;
@@ -91,6 +97,7 @@ static inline bool is_lane_count_valid(u32 lane_count)
 struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux,
 			      struct msm_dp_link *link,
 			      void __iomem *link_base,
-			      void __iomem *p0_base);
+			      void __iomem *p0_base,
+			      void __iomem *p1_base);
 void msm_dp_panel_put(struct msm_dp_panel *msm_dp_panel);
 #endif /* _DP_PANEL_H_ */

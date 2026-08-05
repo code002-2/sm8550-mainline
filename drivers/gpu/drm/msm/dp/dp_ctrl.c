@@ -127,7 +127,7 @@ struct msm_dp_ctrl_private {
 	unsigned int num_link_clks;
 	struct clk_bulk_data *link_clks;
 
-	struct clk *pixel_clk;
+	struct clk *pixel_clks[MSM_DP_STREAM_MAX];
 
 	union phy_configure_opts phy_opts;
 
@@ -2177,7 +2177,7 @@ static int msm_dp_ctrl_process_phy_test_request(struct msm_dp_ctrl_private *ctrl
 	}
 
 	pixel_rate = ctrl->panel->msm_dp_mode.drm_mode.clock;
-	ret = clk_set_rate(ctrl->pixel_clk, pixel_rate * 1000);
+	ret = clk_set_rate(ctrl->pixel_clks[MSM_DP_STREAM_0], pixel_rate * 1000);
 	if (ret) {
 		DRM_ERROR("Failed to set pixel clock rate. ret=%d\n", ret);
 		return ret;
@@ -2186,7 +2186,7 @@ static int msm_dp_ctrl_process_phy_test_request(struct msm_dp_ctrl_private *ctrl
 	if (ctrl->stream_clks_on) {
 		drm_dbg_dp(ctrl->drm_dev, "pixel clks already enabled\n");
 	} else {
-		ret = clk_prepare_enable(ctrl->pixel_clk);
+		ret = clk_prepare_enable(ctrl->pixel_clks[MSM_DP_STREAM_0]);
 		if (ret) {
 			DRM_ERROR("Failed to start pixel clocks. ret=%d\n", ret);
 			return ret;
@@ -2499,7 +2499,7 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, bool force_link_train
 		}
 	}
 
-	ret = clk_set_rate(ctrl->pixel_clk, pixel_rate * 1000);
+	ret = clk_set_rate(ctrl->pixel_clks[MSM_DP_STREAM_0], pixel_rate * 1000);
 	if (ret) {
 		DRM_ERROR("Failed to set pixel clock rate. ret=%d\n", ret);
 		goto end;
@@ -2508,7 +2508,7 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, bool force_link_train
 	if (ctrl->stream_clks_on) {
 		drm_dbg_dp(ctrl->drm_dev, "pixel clks already enabled\n");
 	} else {
-		ret = clk_prepare_enable(ctrl->pixel_clk);
+		ret = clk_prepare_enable(ctrl->pixel_clks[MSM_DP_STREAM_0]);
 		if (ret) {
 			DRM_ERROR("Failed to start pixel clocks. ret=%d\n", ret);
 			goto end;
@@ -2569,7 +2569,7 @@ void msm_dp_ctrl_off_link_stream(struct msm_dp_ctrl *msm_dp_ctrl)
 	msm_dp_ctrl_mainlink_disable(ctrl);
 
 	if (ctrl->stream_clks_on) {
-		clk_disable_unprepare(ctrl->pixel_clk);
+		clk_disable_unprepare(ctrl->pixel_clks[MSM_DP_STREAM_0]);
 		ctrl->stream_clks_on = false;
 	}
 
@@ -2614,7 +2614,7 @@ void msm_dp_ctrl_off(struct msm_dp_ctrl *msm_dp_ctrl)
 	msm_dp_ctrl_reset(&ctrl->msm_dp_ctrl);
 
 	if (ctrl->stream_clks_on) {
-		clk_disable_unprepare(ctrl->pixel_clk);
+		clk_disable_unprepare(ctrl->pixel_clks[MSM_DP_STREAM_0]);
 		ctrl->stream_clks_on = false;
 	}
 
@@ -2716,9 +2716,14 @@ static int msm_dp_ctrl_clk_init(struct msm_dp_ctrl *msm_dp_ctrl)
 	if (rc)
 		return rc;
 
-	ctrl->pixel_clk = devm_clk_get(dev, "stream_pixel");
-	if (IS_ERR(ctrl->pixel_clk))
-		return PTR_ERR(ctrl->pixel_clk);
+	ctrl->pixel_clks[MSM_DP_STREAM_0] = devm_clk_get(dev, "stream_pixel");
+	if (IS_ERR(ctrl->pixel_clks[MSM_DP_STREAM_0]))
+		return PTR_ERR(ctrl->pixel_clks[MSM_DP_STREAM_0]);
+
+	ctrl->pixel_clks[MSM_DP_STREAM_1] =
+		devm_clk_get_optional(dev, "stream_1_pixel");
+	if (IS_ERR(ctrl->pixel_clks[MSM_DP_STREAM_1]))
+		return PTR_ERR(ctrl->pixel_clks[MSM_DP_STREAM_1]);
 
 	return 0;
 }

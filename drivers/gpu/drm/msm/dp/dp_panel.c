@@ -26,6 +26,7 @@ struct msm_dp_panel_private {
 	struct msm_dp_link *link;
 	void __iomem *link_base;
 	void __iomem *p0_base;
+	void __iomem *p1_base;
 	bool panel_on;
 };
 
@@ -721,7 +722,8 @@ int msm_dp_panel_init_panel_info(struct msm_dp_panel *msm_dp_panel)
 struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux,
 			      struct msm_dp_link *link,
 			      void __iomem *link_base,
-			      void __iomem *p0_base)
+			      void __iomem *p0_base,
+			      void __iomem *p1_base)
 {
 	struct msm_dp_panel_private *panel;
 	struct msm_dp_panel *msm_dp_panel;
@@ -740,6 +742,7 @@ struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux
 	panel->link = link;
 	panel->link_base = link_base;
 	panel->p0_base = p0_base;
+	panel->p1_base = p1_base;
 
 	msm_dp_panel = &panel->msm_dp_panel;
 	msm_dp_panel->max_bw_code = DP_LINK_BW_8_1;
