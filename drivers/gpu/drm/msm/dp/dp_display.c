@@ -89,6 +89,7 @@ struct msm_dp_display_private {
 	struct drm_dp_aux *aux;
 	struct msm_dp_link    *link;
 	struct msm_dp_panel   *panel;
+	struct msm_dp_panel   *mst_panel;
 	struct msm_dp_ctrl    *ctrl;
 
 	struct msm_dp_display_mode msm_dp_mode;
@@ -759,6 +760,7 @@ static int msm_dp_irq_hpd_handle(struct msm_dp_display_private *dp, u32 data)
 static void msm_dp_display_deinit_sub_modules(struct msm_dp_display_private *dp)
 {
 	msm_dp_audio_put(dp->audio);
+	msm_dp_panel_put(dp->mst_panel);
 	msm_dp_panel_put(dp->panel);
 	msm_dp_aux_put(dp->aux);
 }
@@ -797,12 +799,23 @@ static int msm_dp_init_sub_modules(struct msm_dp_display_private *dp)
 	}
 
 	dp->panel = msm_dp_panel_get(dev, dp->aux, dp->link, dp->link_base,
-				     dp->p0_base, dp->p1_base);
+				     dp->p0_base, MSM_DP_STREAM_0);
 	if (IS_ERR(dp->panel)) {
 		rc = PTR_ERR(dp->panel);
 		DRM_ERROR("failed to initialize panel, rc = %d\n", rc);
 		dp->panel = NULL;
 		goto error_link;
+	}
+
+	if (dp->p1_base) {
+		dp->mst_panel = msm_dp_panel_get(dev, dp->aux, dp->link,
+						 dp->link_base, dp->p1_base,
+						 MSM_DP_STREAM_1);
+		if (IS_ERR(dp->mst_panel)) {
+			rc = PTR_ERR(dp->mst_panel);
+			dp->mst_panel = NULL;
+			goto error_ctrl;
+		}
 	}
 
 	dp->ctrl = msm_dp_ctrl_get(dev, dp->link, dp->panel, dp->aux,
@@ -825,6 +838,7 @@ static int msm_dp_init_sub_modules(struct msm_dp_display_private *dp)
 	return rc;
 
 error_ctrl:
+	msm_dp_panel_put(dp->mst_panel);
 	msm_dp_panel_put(dp->panel);
 error_link:
 	msm_dp_aux_put(dp->aux);

@@ -25,8 +25,8 @@ struct msm_dp_panel_private {
 	struct drm_dp_aux *aux;
 	struct msm_dp_link *link;
 	void __iomem *link_base;
-	void __iomem *p0_base;
-	void __iomem *p1_base;
+	void __iomem *p_base;
+	enum msm_dp_stream_id stream_id;
 	bool panel_on;
 };
 
@@ -52,7 +52,7 @@ static inline void msm_dp_write_p0(struct msm_dp_panel_private *panel,
 	 * To make sure interface reg writes happens before any other operation,
 	 * this function uses writel() instread of writel_relaxed()
 	 */
-	writel(data, panel->p0_base + offset);
+	writel(data, panel->p_base + offset);
 }
 
 static inline u32 msm_dp_read_p0(struct msm_dp_panel_private *panel,
@@ -62,7 +62,13 @@ static inline u32 msm_dp_read_p0(struct msm_dp_panel_private *panel,
 	 * To make sure interface reg writes happens before any other operation,
 	 * this function uses writel() instread of writel_relaxed()
 	 */
-	return readl_relaxed(panel->p0_base + offset);
+	return readl_relaxed(panel->p_base + offset);
+}
+
+static u32 msm_dp_panel_link_offset(enum msm_dp_stream_id stream_id,
+				    u32 stream0, u32 stream1)
+{
+	return stream_id == MSM_DP_STREAM_1 ? stream1 : stream0;
 }
 
 static void msm_dp_panel_read_psr_cap(struct msm_dp_panel_private *panel)
@@ -603,7 +609,8 @@ static int msm_dp_panel_setup_vsc_sdp_yuv_420(struct msm_dp_panel *msm_dp_panel)
 	return 0;
 }
 
-int msm_dp_panel_timing_cfg(struct msm_dp_panel *msm_dp_panel, bool wide_bus_en)
+int msm_dp_panel_timing_cfg(struct msm_dp_panel *msm_dp_panel, bool wide_bus_en,
+			    enum msm_dp_stream_id stream_id)
 {
 	u32 data, total_ver, total_hor;
 	struct msm_dp_panel_private *panel;
@@ -657,10 +664,19 @@ int msm_dp_panel_timing_cfg(struct msm_dp_panel *msm_dp_panel, bool wide_bus_en)
 
 	msm_dp_active = data;
 
-	msm_dp_write_link(panel, REG_DP_TOTAL_HOR_VER, total);
-	msm_dp_write_link(panel, REG_DP_START_HOR_VER_FROM_SYNC, sync_start);
-	msm_dp_write_link(panel, REG_DP_HSYNC_VSYNC_WIDTH_POLARITY, width_blanking);
-	msm_dp_write_link(panel, REG_DP_ACTIVE_HOR_VER, msm_dp_active);
+	reg = msm_dp_panel_link_offset(stream_id, REG_DP_TOTAL_HOR_VER,
+				       REG_DP1_TOTAL_HOR_VER);
+	msm_dp_write_link(panel, reg, total);
+	reg = msm_dp_panel_link_offset(stream_id, REG_DP_START_HOR_VER_FROM_SYNC,
+				       REG_DP1_START_HOR_VER_FROM_SYNC);
+	msm_dp_write_link(panel, reg, sync_start);
+	reg = msm_dp_panel_link_offset(stream_id,
+				       REG_DP_HSYNC_VSYNC_WIDTH_POLARITY,
+				       REG_DP1_HSYNC_VSYNC_WIDTH_POLARITY);
+	msm_dp_write_link(panel, reg, width_blanking);
+	reg = msm_dp_panel_link_offset(stream_id, REG_DP_ACTIVE_HOR_VER,
+				       REG_DP1_ACTIVE_HOR_VER);
+	msm_dp_write_link(panel, reg, msm_dp_active);
 
 	reg = msm_dp_read_p0(panel, MMSS_DP_INTF_CONFIG);
 	if (wide_bus_en)
@@ -722,13 +738,13 @@ int msm_dp_panel_init_panel_info(struct msm_dp_panel *msm_dp_panel)
 struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux,
 			      struct msm_dp_link *link,
 			      void __iomem *link_base,
-			      void __iomem *p0_base,
-			      void __iomem *p1_base)
+			      void __iomem *p_base,
+			      enum msm_dp_stream_id stream_id)
 {
 	struct msm_dp_panel_private *panel;
 	struct msm_dp_panel *msm_dp_panel;
 
-	if (!dev || !aux || !link) {
+	if (!dev || !aux || !link || !p_base || stream_id >= MSM_DP_STREAM_MAX) {
 		DRM_ERROR("invalid input\n");
 		return ERR_PTR(-EINVAL);
 	}
@@ -741,8 +757,8 @@ struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux
 	panel->aux = aux;
 	panel->link = link;
 	panel->link_base = link_base;
-	panel->p0_base = p0_base;
-	panel->p1_base = p1_base;
+	panel->p_base = p_base;
+	panel->stream_id = stream_id;
 
 	msm_dp_panel = &panel->msm_dp_panel;
 	msm_dp_panel->max_bw_code = DP_LINK_BW_8_1;

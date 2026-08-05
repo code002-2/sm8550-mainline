@@ -18,6 +18,17 @@ struct phy;
 
 int msm_dp_ctrl_on_link(struct msm_dp_ctrl *msm_dp_ctrl);
 int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, bool force_link_train);
+int msm_dp_ctrl_on_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
+			      struct msm_dp_panel *panel,
+			      enum msm_dp_stream_id stream_id, int pbn);
+void msm_dp_ctrl_off_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
+				struct msm_dp_panel *panel,
+				enum msm_dp_stream_id stream_id);
+void msm_dp_ctrl_set_mst(struct msm_dp_ctrl *msm_dp_ctrl, bool enable);
+void msm_dp_ctrl_set_mst_channel_info(struct msm_dp_ctrl *msm_dp_ctrl,
+				      enum msm_dp_stream_id stream_id,
+				      u32 start_slot, u32 num_slots);
+int msm_dp_ctrl_mst_send_act(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_off_link_stream(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_off_link(struct msm_dp_ctrl *msm_dp_ctrl);
 void msm_dp_ctrl_off(struct msm_dp_ctrl *msm_dp_ctrl);
