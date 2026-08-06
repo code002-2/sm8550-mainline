@@ -13,6 +13,7 @@
 #include "dp_link.h"
 
 struct edid;
+struct drm_connector_state;
 
 enum msm_dp_stream_id {
 	MSM_DP_STREAM_0,
@@ -69,6 +70,14 @@ void msm_dp_panel_ack_dsc_dto(struct msm_dp_panel *msm_dp_panel);
 
 void msm_dp_panel_enable_vsc_sdp(struct msm_dp_panel *msm_dp_panel, struct dp_sdp *vsc_sdp);
 void msm_dp_panel_disable_vsc_sdp(struct msm_dp_panel *msm_dp_panel);
+void msm_dp_panel_set_colorspace(struct msm_dp_panel *msm_dp_panel,
+				 u32 colorspace);
+bool msm_dp_panel_colorspace_enabled(struct msm_dp_panel *msm_dp_panel);
+u8 msm_dp_panel_get_misc_colorimetry(struct msm_dp_panel *msm_dp_panel);
+int msm_dp_panel_config_colorspace(struct msm_dp_panel *msm_dp_panel);
+void msm_dp_panel_config_spd(struct msm_dp_panel *msm_dp_panel);
+int msm_dp_panel_config_hdr(struct msm_dp_panel *msm_dp_panel,
+			    const struct drm_connector_state *conn_state);
 
 /**
  * is_link_rate_valid() - validates the link rate

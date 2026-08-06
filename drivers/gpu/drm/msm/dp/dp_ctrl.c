@@ -498,13 +498,15 @@ static void msm_dp_ctrl_configure_source_params(struct msm_dp_ctrl_private *ctrl
 	test_bits_depth =
 		msm_dp_link_get_test_bits_depth(ctrl->link,
 						panel->msm_dp_mode.bpp);
-	colorimetry_cfg = msm_dp_link_get_colorimetry_config(ctrl->link);
+	colorimetry_cfg = msm_dp_panel_get_misc_colorimetry(panel);
 
 	misc_val = msm_dp_read_link(ctrl, stream_id == MSM_DP_STREAM_1 ?
 				    REG_DP1_MISC1_MISC0 : REG_DP_MISC1_MISC0);
 
 	/* clear bpp bits */
 	misc_val &= ~(0x07 << DP_MISC0_TEST_BITS_DEPTH_SHIFT);
+	if (msm_dp_panel_colorspace_enabled(panel))
+		misc_val &= ~(0x0f << DP_MISC0_COLORIMETRY_CFG_SHIFT);
 	misc_val |= colorimetry_cfg << DP_MISC0_COLORIMETRY_CFG_SHIFT;
 	misc_val |= test_bits_depth << DP_MISC0_TEST_BITS_DEPTH_SHIFT;
 	/* Configure clock to synchronous mode */
@@ -515,6 +517,7 @@ static void msm_dp_ctrl_configure_source_params(struct msm_dp_ctrl_private *ctrl
 			   REG_DP1_MISC1_MISC0 : REG_DP_MISC1_MISC0, misc_val);
 
 	msm_dp_panel_timing_cfg(panel, panel->wide_bus_en);
+	msm_dp_panel_config_colorspace(panel);
 }
 
 /*
@@ -2433,14 +2436,15 @@ static int msm_dp_ctrl_process_phy_test_request(struct msm_dp_ctrl_private *ctrl
 	return 0;
 }
 
-void msm_dp_ctrl_handle_sink_request(struct msm_dp_ctrl *msm_dp_ctrl)
+int msm_dp_ctrl_handle_sink_request(struct msm_dp_ctrl *msm_dp_ctrl)
 {
 	struct msm_dp_ctrl_private *ctrl;
 	u32 sink_request = 0x0;
+	int ret;
 
 	if (!msm_dp_ctrl) {
 		DRM_ERROR("invalid input\n");
-		return;
+		return -EINVAL;
 	}
 
 	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
@@ -2448,26 +2452,31 @@ void msm_dp_ctrl_handle_sink_request(struct msm_dp_ctrl *msm_dp_ctrl)
 
 	if (sink_request & DP_TEST_LINK_PHY_TEST_PATTERN) {
 		drm_dbg_dp(ctrl->drm_dev, "PHY_TEST_PATTERN request\n");
-		if (msm_dp_ctrl_process_phy_test_request(ctrl)) {
+		ret = msm_dp_ctrl_process_phy_test_request(ctrl);
+		if (ret) {
 			DRM_ERROR("process phy_test_req failed\n");
-			return;
+			return ret;
 		}
 	}
 
 	if (sink_request & DP_LINK_STATUS_UPDATED) {
-		if (msm_dp_ctrl_link_maintenance(ctrl)) {
+		ret = msm_dp_ctrl_link_maintenance(ctrl);
+		if (ret) {
 			DRM_ERROR("LM failed: TEST_LINK_TRAINING\n");
-			return;
+			return ret;
 		}
 	}
 
 	if (sink_request & DP_TEST_LINK_TRAINING) {
 		msm_dp_link_send_test_response(ctrl->link);
-		if (msm_dp_ctrl_link_maintenance(ctrl)) {
+		ret = msm_dp_ctrl_link_maintenance(ctrl);
+		if (ret) {
 			DRM_ERROR("LM failed: TEST_LINK_TRAINING\n");
-			return;
+			return ret;
 		}
 	}
+
+	return 0;
 }
 
 static bool msm_dp_ctrl_clock_recovery_any_ok(
@@ -2896,6 +2905,7 @@ void msm_dp_ctrl_off_mst_stream(struct msm_dp_ctrl *msm_dp_ctrl,
 	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
 
 	if (ctrl->stream_clks_on[stream_id]) {
+		msm_dp_panel_disable_vsc_sdp(panel);
 		msm_dp_panel_ack_dsc_dto(panel);
 		clk_disable_unprepare(ctrl->pixel_clks[stream_id]);
 		ctrl->stream_clks_on[stream_id] = false;

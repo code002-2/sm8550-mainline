@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <drm/display/drm_dp_mst_helper.h>
+#include <drm/display/drm_hdmi_audio_helper.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_probe_helper.h>
 
+#include "dp_audio.h"
 #include "dp_mst_drm.h"
 #include "dp_ctrl.h"
 
@@ -29,6 +31,7 @@ struct msm_dp_mst_bridge {
 	bool payload_ready;
 	bool stream_started;
 	bool stream_pre_disabled;
+	struct drm_connector *audio_connector;
 };
 
 struct msm_dp_mst_connector {
@@ -41,6 +44,7 @@ struct msm_dp_mst {
 	struct msm_dp *dp;
 	struct drm_dp_mst_topology_mgr mgr;
 	struct msm_dp_mst_bridge *bridges[MSM_DP_MST_MAX_STREAMS];
+	int selected_audio_stream;
 	bool initialized;
 	bool prepared;
 	bool active;
@@ -54,6 +58,124 @@ struct msm_dp_mst {
 	container_of(x, struct msm_dp_mst_bridge_state, base)
 #define to_msm_dp_mst_connector(x) \
 	container_of(x, struct msm_dp_mst_connector, connector)
+
+static void msm_dp_mst_audio_copy_eld(struct msm_dp_mst *mst,
+				      struct drm_connector *connector)
+{
+	struct drm_connector *root = mst->dp->connector;
+	u8 eld[MAX_ELD_BYTES] = {};
+
+	if (connector) {
+		mutex_lock(&connector->eld_mutex);
+		memcpy(eld, connector->eld, sizeof(eld));
+		mutex_unlock(&connector->eld_mutex);
+	}
+
+	mutex_lock(&root->eld_mutex);
+	memcpy(root->eld, eld, sizeof(eld));
+	mutex_unlock(&root->eld_mutex);
+}
+
+static int msm_dp_mst_find_audio_stream(struct msm_dp_mst *mst)
+{
+	int i;
+
+	for (i = 0; i < MSM_DP_MST_MAX_STREAMS; i++)
+		if (mst->bridges[i] && mst->bridges[i]->audio_connector)
+			return i;
+
+	return -1;
+}
+
+static void msm_dp_mst_set_audio_stream(struct msm_dp_mst *mst, int stream_id,
+					bool stop_engine)
+{
+	struct drm_connector *root = mst->dp->connector;
+	struct msm_dp_mst_bridge *bridge;
+
+	if (mst->selected_audio_stream == stream_id)
+		return;
+
+	if (mst->selected_audio_stream >= 0) {
+		mst->selected_audio_stream = -1;
+		drm_connector_hdmi_audio_plugged_notify(root, false);
+		if (stop_engine)
+			msm_dp_audio_mst_stop_locked(mst->dp);
+	}
+
+	if (stream_id < 0) {
+		msm_dp_mst_audio_copy_eld(mst, NULL);
+		return;
+	}
+
+	bridge = mst->bridges[stream_id];
+	if (WARN_ON(!bridge || !bridge->audio_connector))
+		return;
+
+	msm_dp_mst_audio_copy_eld(mst, bridge->audio_connector);
+	mst->selected_audio_stream = stream_id;
+	drm_connector_hdmi_audio_plugged_notify(root, true);
+}
+
+static void msm_dp_mst_audio_enable(struct msm_dp_mst_bridge *bridge,
+				    struct drm_connector *connector)
+{
+	struct msm_dp_mst *mst = bridge->dp->mst;
+
+	if (!connector->display_info.has_audio)
+		return;
+
+	mutex_lock(&bridge->dp->audio_lock);
+	if (WARN_ON(bridge->audio_connector))
+		goto unlock;
+
+	drm_connector_get(connector);
+	bridge->audio_connector = connector;
+	if (mst->selected_audio_stream < 0)
+		msm_dp_mst_set_audio_stream(mst, bridge->stream_id, false);
+
+unlock:
+	mutex_unlock(&bridge->dp->audio_lock);
+}
+
+static void msm_dp_mst_audio_disable(struct msm_dp_mst_bridge *bridge)
+{
+	struct msm_dp_mst *mst = bridge->dp->mst;
+	bool selected;
+
+	mutex_lock(&bridge->dp->audio_lock);
+	if (!bridge->audio_connector)
+		goto unlock;
+
+	selected = mst->selected_audio_stream == bridge->stream_id;
+	if (selected)
+		msm_dp_mst_set_audio_stream(mst, -1, true);
+
+	drm_connector_put(bridge->audio_connector);
+	bridge->audio_connector = NULL;
+	if (selected)
+		msm_dp_mst_set_audio_stream(mst,
+					    msm_dp_mst_find_audio_stream(mst), false);
+
+unlock:
+	mutex_unlock(&bridge->dp->audio_lock);
+}
+
+static void msm_dp_mst_audio_clear(struct msm_dp_mst *mst, bool stop_engine)
+{
+	int i;
+
+	mutex_lock(&mst->dp->audio_lock);
+	msm_dp_mst_set_audio_stream(mst, -1, stop_engine);
+	for (i = 0; i < MSM_DP_MST_MAX_STREAMS; i++) {
+		if (!mst->bridges[i] || !mst->bridges[i]->audio_connector)
+			continue;
+
+		drm_connector_put(mst->bridges[i]->audio_connector);
+		mst->bridges[i]->audio_connector = NULL;
+	}
+	mutex_unlock(&mst->dp->audio_lock);
+}
 
 static u32 msm_dp_mst_connector_bpp(const struct drm_connector *connector)
 {
@@ -151,6 +273,7 @@ static int msm_dp_mst_bridge_atomic_check(struct drm_bridge *bridge,
 					  struct drm_crtc_state *crtc_state,
 					  struct drm_connector_state *conn_state)
 {
+	struct drm_connector_state *old_conn_state;
 	struct msm_dp_mst_bridge *mst_bridge = to_msm_dp_mst_bridge(bridge);
 	struct msm_dp_mst_bridge_state *mst_state =
 		to_msm_dp_mst_bridge_state(bridge_state);
@@ -159,6 +282,13 @@ static int msm_dp_mst_bridge_atomic_check(struct drm_bridge *bridge,
 	struct drm_dp_mst_topology_state *topology_state;
 	u32 link_rate, lane_count;
 	int bpp, slots;
+
+	old_conn_state = drm_atomic_get_old_connector_state(conn_state->state,
+							    conn_state->connector);
+	if (old_conn_state && crtc_state && conn_state->crtc &&
+	    (!drm_connector_atomic_hdr_metadata_equal(old_conn_state, conn_state) ||
+	     old_conn_state->colorspace != conn_state->colorspace))
+		crtc_state->mode_changed = true;
 
 	/* Plane-only updates do not change the VC payload. */
 	if (!conn_state->crtc || !crtc_state->active ||
@@ -319,6 +449,7 @@ static void msm_dp_mst_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 	struct drm_bridge_state *bridge_atomic_state;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
+	struct drm_connector_state *conn_state;
 	u32 bpp;
 	int ret;
 
@@ -350,10 +481,15 @@ static void msm_dp_mst_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 	crtc_state = crtc ? drm_atomic_get_new_crtc_state(state, crtc) : NULL;
 	if (WARN_ON(!crtc_state))
 		return;
+	conn_state = drm_atomic_get_new_connector_state(state,
+							&connector->connector);
+	if (WARN_ON(!conn_state))
+		return;
 	bpp = msm_dp_mst_connector_bpp(&connector->connector);
 
 	ret = msm_dp_display_mst_stream_enable(bridge->dp, bridge->stream_id,
 					       &crtc_state->adjusted_mode, bpp,
+					       conn_state->colorspace,
 					       bridge_state->pbn);
 	if (ret) {
 		drm_err(mst->mgr.dev, "failed to enable MST stream %u: %d\n",
@@ -381,6 +517,14 @@ static void msm_dp_mst_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 		drm_err(mst->mgr.dev, "failed to add MST payload part 2: %d\n", ret);
 		return;
 	}
+
+	msm_dp_display_mst_stream_config_spd(bridge->dp, bridge->stream_id);
+	ret = msm_dp_display_mst_stream_config_hdr(bridge->dp,
+						   bridge->stream_id, conn_state);
+	if (ret)
+		drm_dbg_dp(mst->mgr.dev, "failed to configure MST HDR: %d\n", ret);
+
+	msm_dp_mst_audio_enable(bridge, &connector->connector);
 }
 
 static void msm_dp_mst_bridge_atomic_disable(struct drm_bridge *drm_bridge,
@@ -445,6 +589,8 @@ stop_stream:
 	 * damaged state reaches commit, still stop the source stream and release
 	 * its PM reference in post-disable rather than leaving hardware running.
 	 */
+	msm_dp_mst_audio_disable(bridge);
+	msm_dp_display_mst_stream_config_hdr(bridge->dp, bridge->stream_id, NULL);
 	if (!payload_removed)
 		msm_dp_display_mst_set_channel(bridge->dp, bridge->stream_id, 0, 0);
 	if (bridge->stream_started && !bridge->stream_pre_disabled) {
@@ -530,6 +676,8 @@ msm_dp_mst_connector_mode_valid(struct drm_connector *connector,
 
 	if (!mode_pclk_khz)
 		return MODE_CLOCK_LOW;
+	if (drm_mode_is_420_only(&connector->display_info, mode))
+		return MODE_NO_420;
 
 	if (msm_dp_wide_bus_available(mst_conn->mst->dp))
 		mode_pclk_khz /= 2;
@@ -722,6 +870,9 @@ msm_dp_mst_add_connector(struct drm_dp_mst_topology_mgr *mgr,
 				   mgr->dev->mode_config.tile_property, 0);
 	drm_connector_set_path_property(&mst_conn->connector, path);
 	msm_dp_mst_connector_funcs.reset(&mst_conn->connector);
+	msm_dp_drm_attach_colorspace_property(&mst_conn->connector,
+					      mst->dp->connector);
+	drm_connector_attach_hdr_output_metadata_property(&mst_conn->connector);
 	drm_dp_mst_get_port_malloc(port);
 
 	return &mst_conn->connector;
@@ -751,6 +902,7 @@ int msm_dp_mst_init(struct msm_dp *dp)
 
 	mst->dp = dp;
 	mst->mgr.cbs = &msm_dp_mst_topology_cbs;
+	mst->selected_audio_stream = -1;
 	ret = drm_dp_mst_topology_mgr_init(&mst->mgr, dp->drm_dev,
 					   msm_dp_display_get_aux(dp), 16,
 					   MSM_DP_MST_MAX_STREAMS,
@@ -769,6 +921,7 @@ void msm_dp_mst_destroy(struct msm_dp *dp)
 	if (!dp->mst || !dp->mst->initialized)
 		return;
 
+	msm_dp_mst_audio_clear(dp->mst, false);
 	if (dp->mst->mgr.mst_state)
 		drm_dp_mst_topology_mgr_set_mst(&dp->mst->mgr, false);
 	else if (dp->mst->prepared)
@@ -823,6 +976,51 @@ bool msm_dp_mst_active(struct msm_dp *dp)
 	return dp->mst && (dp->mst->active || dp->mst->disconnecting);
 }
 
+bool msm_dp_mst_audio_stream(struct msm_dp *dp,
+			     enum msm_dp_stream_id *stream_id)
+{
+	struct msm_dp_mst *mst = dp->mst;
+	int selected;
+
+	lockdep_assert_held(&dp->audio_lock);
+
+	if (!mst || !mst->initialized || !mst->active || mst->suspended)
+		return false;
+
+	selected = mst->selected_audio_stream;
+	if (selected < 0 || selected >= MSM_DP_MST_MAX_STREAMS)
+		return false;
+
+	*stream_id = selected;
+	return true;
+}
+
+void msm_dp_mst_audio_disconnect(struct msm_dp *dp)
+{
+	if (dp->mst && dp->mst->initialized)
+		msm_dp_mst_audio_clear(dp->mst, true);
+}
+
+void msm_dp_mst_audio_link_maintenance(struct msm_dp *dp, bool enable)
+{
+	struct msm_dp_mst *mst = dp->mst;
+
+	if (!mst || !mst->initialized)
+		return;
+
+	mutex_lock(&dp->audio_lock);
+	if (enable) {
+		if (mst->active && !mst->suspended &&
+		    mst->selected_audio_stream < 0)
+			msm_dp_mst_set_audio_stream(mst,
+						    msm_dp_mst_find_audio_stream(mst),
+						    false);
+	} else {
+		msm_dp_mst_set_audio_stream(mst, -1, true);
+	}
+	mutex_unlock(&dp->audio_lock);
+}
+
 bool msm_dp_mst_disconnecting(struct msm_dp *dp)
 {
 	return dp->mst && dp->mst->disconnecting;
@@ -860,6 +1058,7 @@ int msm_dp_mst_resume(struct msm_dp *dp)
 	if (!ret)
 		return 0;
 
+	msm_dp_mst_audio_clear(mst, true);
 	if (mst->mgr.mst_state)
 		drm_dp_mst_topology_mgr_set_mst(&mst->mgr, false);
 	msm_dp_ctrl_set_mst(msm_dp_display_get_ctrl(dp), false);
@@ -882,6 +1081,8 @@ void msm_dp_mst_resume_failed(struct msm_dp *dp)
 	if (!mst || !mst->initialized)
 		return;
 
+	/* The failed runtime resume does not permit audio register accesses. */
+	msm_dp_mst_audio_clear(mst, false);
 	mst->active = false;
 	mst->prepared = false;
 	mst->disconnecting = true;
