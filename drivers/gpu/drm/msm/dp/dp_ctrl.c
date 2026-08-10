@@ -2436,14 +2436,15 @@ static int msm_dp_ctrl_process_phy_test_request(struct msm_dp_ctrl_private *ctrl
 	return 0;
 }
 
-void msm_dp_ctrl_handle_sink_request(struct msm_dp_ctrl *msm_dp_ctrl)
+int msm_dp_ctrl_handle_sink_request(struct msm_dp_ctrl *msm_dp_ctrl)
 {
 	struct msm_dp_ctrl_private *ctrl;
 	u32 sink_request = 0x0;
+	int ret;
 
 	if (!msm_dp_ctrl) {
 		DRM_ERROR("invalid input\n");
-		return;
+		return -EINVAL;
 	}
 
 	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
@@ -2451,26 +2452,31 @@ void msm_dp_ctrl_handle_sink_request(struct msm_dp_ctrl *msm_dp_ctrl)
 
 	if (sink_request & DP_TEST_LINK_PHY_TEST_PATTERN) {
 		drm_dbg_dp(ctrl->drm_dev, "PHY_TEST_PATTERN request\n");
-		if (msm_dp_ctrl_process_phy_test_request(ctrl)) {
+		ret = msm_dp_ctrl_process_phy_test_request(ctrl);
+		if (ret) {
 			DRM_ERROR("process phy_test_req failed\n");
-			return;
+			return ret;
 		}
 	}
 
 	if (sink_request & DP_LINK_STATUS_UPDATED) {
-		if (msm_dp_ctrl_link_maintenance(ctrl)) {
+		ret = msm_dp_ctrl_link_maintenance(ctrl);
+		if (ret) {
 			DRM_ERROR("LM failed: TEST_LINK_TRAINING\n");
-			return;
+			return ret;
 		}
 	}
 
 	if (sink_request & DP_TEST_LINK_TRAINING) {
 		msm_dp_link_send_test_response(ctrl->link);
-		if (msm_dp_ctrl_link_maintenance(ctrl)) {
+		ret = msm_dp_ctrl_link_maintenance(ctrl);
+		if (ret) {
 			DRM_ERROR("LM failed: TEST_LINK_TRAINING\n");
-			return;
+			return ret;
 		}
 	}
+
+	return 0;
 }
 
 static bool msm_dp_ctrl_clock_recovery_any_ok(

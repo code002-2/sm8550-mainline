@@ -16,6 +16,7 @@
 #include "dp_panel.h"
 #include "dp_reg.h"
 #include "dp_display.h"
+#include "dp_mst_drm.h"
 #include "dp_utils.h"
 
 struct msm_dp_audio_private {
@@ -128,11 +129,14 @@ static void msm_dp_audio_isrc_sdp(struct msm_dp_audio_private *audio)
 	msm_dp_write_link(audio, MMSS_DP_AUDIO_ISRC_1, header[1]);
 }
 
-static void msm_dp_audio_config_sdp(struct msm_dp_audio_private *audio)
+static void msm_dp_audio_config_sdp_stream(struct msm_dp_audio_private *audio,
+					   enum msm_dp_stream_id stream_id)
 {
+	u32 offset = stream_id == MSM_DP_STREAM_1 ?
+		     MMSS_DP1_SDP_CFG - MMSS_DP_SDP_CFG : 0;
 	u32 sdp_cfg, sdp_cfg2;
 
-	sdp_cfg = msm_dp_read_link(audio, MMSS_DP_SDP_CFG);
+	sdp_cfg = msm_dp_read_link(audio, MMSS_DP_SDP_CFG + offset);
 	/* AUDIO_TIMESTAMP_SDP_EN */
 	sdp_cfg |= BIT(1);
 	/* AUDIO_STREAM_SDP_EN */
@@ -146,9 +150,9 @@ static void msm_dp_audio_config_sdp(struct msm_dp_audio_private *audio)
 
 	drm_dbg_dp(audio->drm_dev, "sdp_cfg = 0x%x\n", sdp_cfg);
 
-	msm_dp_write_link(audio, MMSS_DP_SDP_CFG, sdp_cfg);
+	msm_dp_write_link(audio, MMSS_DP_SDP_CFG + offset, sdp_cfg);
 
-	sdp_cfg2 = msm_dp_read_link(audio, MMSS_DP_SDP_CFG2);
+	sdp_cfg2 = msm_dp_read_link(audio, MMSS_DP_SDP_CFG2 + offset);
 	/* IFRM_REGSRC -> Do not use reg values */
 	sdp_cfg2 &= ~BIT(0);
 	/* AUDIO_STREAM_HB3_REGSRC-> Do not use reg values */
@@ -156,12 +160,13 @@ static void msm_dp_audio_config_sdp(struct msm_dp_audio_private *audio)
 
 	drm_dbg_dp(audio->drm_dev, "sdp_cfg2 = 0x%x\n", sdp_cfg2);
 
-	msm_dp_write_link(audio, MMSS_DP_SDP_CFG2, sdp_cfg2);
+	msm_dp_write_link(audio, MMSS_DP_SDP_CFG2 + offset, sdp_cfg2);
 }
 
-static void msm_dp_audio_setup_sdp(struct msm_dp_audio_private *audio)
+static void msm_dp_audio_setup_sdp(struct msm_dp_audio_private *audio,
+				   enum msm_dp_stream_id stream_id)
 {
-	msm_dp_audio_config_sdp(audio);
+	msm_dp_audio_config_sdp_stream(audio, stream_id);
 
 	msm_dp_audio_stream_sdp(audio);
 	msm_dp_audio_timestamp_sdp(audio);
@@ -273,6 +278,9 @@ int msm_dp_audio_prepare(struct drm_bridge *bridge,
 	int rc = 0;
 	struct msm_dp_audio_private *audio;
 	struct msm_dp *msm_dp_display;
+	enum msm_dp_stream_id stream_id = MSM_DP_STREAM_0;
+	bool mst_audio;
+	u32 link_rate;
 
 	msm_dp_display = to_dp_bridge(bridge)->msm_dp_display;
 
@@ -284,23 +292,34 @@ int msm_dp_audio_prepare(struct drm_bridge *bridge,
 	 * such cases check for connection status and bail out if not
 	 * connected.
 	 */
-	if (!msm_dp_display->power_on)
-		goto end;
-
 	audio = msm_dp_audio_get_data(msm_dp_display);
 	if (IS_ERR(audio)) {
 		rc = PTR_ERR(audio);
 		goto end;
 	}
 
-	audio->channels = params->channels;
+	mutex_lock(&msm_dp_display->audio_lock);
+	mst_audio = msm_dp_mst_audio_stream(msm_dp_display, &stream_id);
+	if (!msm_dp_display->power_on && !mst_audio)
+		goto unlock;
 
-	msm_dp_audio_setup_sdp(audio);
+	audio->channels = params->channels;
+	if (mst_audio) {
+		link_rate = msm_dp_display_get_link_rate(msm_dp_display);
+		audio->msm_dp_audio.bw_code = drm_dp_link_rate_to_bw_code(link_rate);
+		audio->msm_dp_audio.lane_count =
+			msm_dp_display_get_lane_count(msm_dp_display);
+	}
+
+	msm_dp_audio_setup_sdp(audio, stream_id);
 	msm_dp_audio_setup_acr(audio);
 	msm_dp_audio_safe_to_exit_level(audio);
 	msm_dp_audio_enable(audio, true);
 	msm_dp_display_signal_audio_start(msm_dp_display);
 	msm_dp_display->audio_enabled = true;
+
+unlock:
+	mutex_unlock(&msm_dp_display->audio_lock);
 
 end:
 	return rc;
@@ -327,11 +346,33 @@ void msm_dp_audio_shutdown(struct drm_bridge *bridge,
 	 * connected. is_connected cannot be used here as its set
 	 * to false earlier than this call
 	 */
+	mutex_lock(&msm_dp_display->audio_lock);
+	if (!msm_dp_display->audio_enabled)
+		goto unlock;
+
+	msm_dp_audio_enable(audio, false);
+	/* signal the dp display to safely shutdown clocks */
+	msm_dp_display_signal_audio_complete(msm_dp_display);
+
+unlock:
+	mutex_unlock(&msm_dp_display->audio_lock);
+}
+
+void msm_dp_audio_mst_stop_locked(struct msm_dp *msm_dp_display)
+{
+	struct msm_dp_audio_private *audio;
+
+	lockdep_assert_held(&msm_dp_display->audio_lock);
+
+	audio = msm_dp_audio_get_data(msm_dp_display);
+	if (IS_ERR(audio))
+		return;
+
 	if (!msm_dp_display->audio_enabled)
 		return;
 
 	msm_dp_audio_enable(audio, false);
-	/* signal the dp display to safely shutdown clocks */
+	msm_dp_display->audio_enabled = false;
 	msm_dp_display_signal_audio_complete(msm_dp_display);
 }
 

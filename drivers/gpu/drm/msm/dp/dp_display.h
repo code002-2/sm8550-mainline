@@ -6,6 +6,8 @@
 #ifndef _DP_DISPLAY_H_
 #define _DP_DISPLAY_H_
 
+#include <linux/mutex.h>
+
 #include "dp_panel.h"
 #include "disp/msm_disp_snapshot.h"
 
@@ -23,6 +25,8 @@ struct msm_dp {
 	struct drm_bridge *next_bridge;
 	bool link_ready;
 	bool audio_enabled;
+	/* Serializes audio MMIO and the selected MST audio route. */
+	struct mutex audio_lock;
 	bool power_on;
 	unsigned int connector_type;
 	bool is_edp;

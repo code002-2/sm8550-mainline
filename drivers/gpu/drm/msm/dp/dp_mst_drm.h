@@ -11,6 +11,11 @@ int msm_dp_mst_bridge_init(struct msm_dp *msm_dp_display,
 			   struct drm_encoder *encoder,
 			   enum msm_dp_stream_id stream_id);
 bool msm_dp_mst_active(struct msm_dp *msm_dp_display);
+bool msm_dp_mst_audio_stream(struct msm_dp *msm_dp_display,
+			     enum msm_dp_stream_id *stream_id);
+void msm_dp_mst_audio_disconnect(struct msm_dp *msm_dp_display);
+void msm_dp_mst_audio_link_maintenance(struct msm_dp *msm_dp_display,
+				       bool enable);
 bool msm_dp_mst_disconnecting(struct msm_dp *msm_dp_display);
 bool msm_dp_mst_suspend(struct msm_dp *msm_dp_display);
 bool msm_dp_mst_suspended(struct msm_dp *msm_dp_display);

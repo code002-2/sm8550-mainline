@@ -614,6 +614,8 @@ static int msm_dp_display_handle_port_status_changed(struct msm_dp_display_priva
 static int msm_dp_display_handle_irq_hpd(struct msm_dp_display_private *dp)
 {
 	u32 sink_request = dp->link->sink_request;
+	bool reset_link;
+	int ret;
 
 	drm_dbg_dp(dp->drm_dev, "%d\n", sink_request);
 	if (dp->hpd_state == ST_DISCONNECTED) {
@@ -625,7 +627,15 @@ static int msm_dp_display_handle_irq_hpd(struct msm_dp_display_private *dp)
 		}
 	}
 
-	msm_dp_ctrl_handle_sink_request(dp->ctrl);
+	reset_link = sink_request & (DP_TEST_LINK_PHY_TEST_PATTERN |
+				     DP_TEST_LINK_TRAINING |
+				     DP_LINK_STATUS_UPDATED);
+	if (reset_link && msm_dp_mst_active(&dp->msm_dp_display))
+		msm_dp_mst_audio_link_maintenance(&dp->msm_dp_display, false);
+
+	ret = msm_dp_ctrl_handle_sink_request(dp->ctrl);
+	if (!ret && reset_link && msm_dp_mst_active(&dp->msm_dp_display))
+		msm_dp_mst_audio_link_maintenance(&dp->msm_dp_display, true);
 
 	if (sink_request & DP_TEST_LINK_VIDEO_PATTERN)
 		msm_dp_display_handle_video_request(dp);
@@ -752,6 +762,8 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp, u32 data)
 
 	if (mst_disconnecting)
 		return 0;
+	if (mst_active)
+		msm_dp_mst_audio_disconnect(&dp->msm_dp_display);
 	if (!mst_active) {
 		msm_dp_mst_hpd(&dp->msm_dp_display, false);
 		msm_dp_aux_enable_xfers(dp->aux, false);
@@ -1530,6 +1542,7 @@ static int msm_dp_display_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	dp->msm_dp_display.pdev = pdev;
+	mutex_init(&dp->msm_dp_display.audio_lock);
 	dp->id = desc->id;
 	dp->msm_dp_display.connector_type = msm_dp_display_get_connector_type(pdev, desc);
 	dp->wide_bus_supported = desc->wide_bus_supported;
@@ -1644,6 +1657,9 @@ static bool msm_dp_display_mst_suspend(struct msm_dp_display_private *dp)
 	mutex_lock(&dp->event_mutex);
 	suspended = msm_dp_mst_suspend(&dp->msm_dp_display);
 	if (suspended) {
+		/* Finish any audio MMIO that started before suspended became true. */
+		mutex_lock(&dp->msm_dp_display.audio_lock);
+		mutex_unlock(&dp->msm_dp_display.audio_lock);
 		msm_dp_link_psm_config(dp->link, &dp->panel->link_info, true);
 		msm_dp_ctrl_off(dp->ctrl);
 		msm_dp_display_host_phy_exit(dp);
