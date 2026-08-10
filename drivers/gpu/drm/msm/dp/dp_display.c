@@ -1935,7 +1935,7 @@ msm_dp_display_get_stream_panel(struct msm_dp_display_private *dp,
 int msm_dp_display_mst_stream_enable(struct msm_dp *msm_dp_display,
 				     enum msm_dp_stream_id stream_id,
 				     const struct drm_display_mode *mode,
-				     u32 bpp, int pbn)
+				     u32 bpp, u32 colorspace, int pbn)
 {
 	struct msm_dp_display_private *dp = container_of(msm_dp_display,
 						struct msm_dp_display_private,
@@ -1968,6 +1968,7 @@ int msm_dp_display_mst_stream_enable(struct msm_dp *msm_dp_display,
 	panel->msm_dp_mode.v_active_low = !!(mode->flags & DRM_MODE_FLAG_NVSYNC);
 	panel->msm_dp_mode.out_fmt_is_yuv_420 = false;
 	panel->wide_bus_en = dp->wide_bus_supported;
+	msm_dp_panel_set_colorspace(panel, colorspace);
 	msm_dp_panel_init_panel_info(panel);
 
 	ret = msm_dp_ctrl_on_mst_stream(dp->ctrl, panel, stream_id, pbn);
@@ -2006,6 +2007,36 @@ void msm_dp_display_mst_stream_disable(struct msm_dp *msm_dp_display,
 		msm_dp_ctrl_off_mst_stream(dp->ctrl, panel, stream_id);
 		mutex_unlock(&dp->event_mutex);
 	}
+}
+
+void msm_dp_display_mst_stream_config_spd(struct msm_dp *msm_dp_display,
+					  enum msm_dp_stream_id stream_id)
+{
+	struct msm_dp_display_private *dp = container_of(msm_dp_display,
+						 struct msm_dp_display_private,
+						 msm_dp_display);
+	struct msm_dp_panel *panel = msm_dp_display_get_stream_panel(dp, stream_id);
+
+	mutex_lock(&dp->event_mutex);
+	msm_dp_panel_config_spd(panel);
+	mutex_unlock(&dp->event_mutex);
+}
+
+int msm_dp_display_mst_stream_config_hdr(struct msm_dp *msm_dp_display,
+					 enum msm_dp_stream_id stream_id,
+					const struct drm_connector_state *conn_state)
+{
+	struct msm_dp_display_private *dp = container_of(msm_dp_display,
+							 struct msm_dp_display_private,
+							 msm_dp_display);
+	struct msm_dp_panel *panel = msm_dp_display_get_stream_panel(dp, stream_id);
+	int ret;
+
+	mutex_lock(&dp->event_mutex);
+	ret = msm_dp_panel_config_hdr(panel, conn_state);
+	mutex_unlock(&dp->event_mutex);
+
+	return ret;
 }
 
 void msm_dp_display_mst_set_channel(struct msm_dp *msm_dp_display,
@@ -2097,10 +2128,13 @@ void msm_dp_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 	struct msm_dp *dp = msm_dp_bridge->msm_dp_display;
 	int rc = 0;
 	struct msm_dp_display_private *msm_dp_display;
+	struct drm_connector_state *conn_state;
 	u32 hpd_state;
 	bool force_link_train = false;
+	int hdr_rc;
 
 	msm_dp_display = container_of(dp, struct msm_dp_display_private, msm_dp_display);
+	conn_state = drm_atomic_get_new_connector_state(state, dp->connector);
 	if (!msm_dp_display->msm_dp_mode.drm_mode.clock) {
 		DRM_ERROR("invalid params\n");
 		return;
@@ -2135,6 +2169,9 @@ void msm_dp_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 		msm_dp_display_host_phy_init(msm_dp_display);
 		force_link_train = true;
 	}
+	if (msm_dp_display_mst_supported(dp) && conn_state)
+		msm_dp_panel_set_colorspace(msm_dp_display->panel,
+					    conn_state->colorspace);
 
 	msm_dp_display_enable(msm_dp_display, force_link_train);
 
@@ -2142,6 +2179,14 @@ void msm_dp_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 	if (rc) {
 		DRM_ERROR("DP display post enable failed, rc=%d\n", rc);
 		msm_dp_display_disable(msm_dp_display);
+	}
+	if (!rc && msm_dp_display_mst_supported(dp)) {
+		msm_dp_panel_config_spd(msm_dp_display->panel);
+		hdr_rc = msm_dp_panel_config_hdr(msm_dp_display->panel,
+						 conn_state);
+		if (hdr_rc)
+			drm_dbg_dp(dp->drm_dev,
+				   "failed to configure SST HDR: %d\n", hdr_rc);
 	}
 
 	/* completed connection */
@@ -2160,6 +2205,8 @@ void msm_dp_bridge_atomic_disable(struct drm_bridge *drm_bridge,
 
 	msm_dp_display = container_of(dp, struct msm_dp_display_private, msm_dp_display);
 
+	if (msm_dp_display_mst_supported(dp))
+		msm_dp_panel_config_hdr(msm_dp_display->panel, NULL);
 	msm_dp_ctrl_push_idle(msm_dp_display->ctrl);
 }
 

@@ -42,9 +42,23 @@ static int msm_dp_bridge_atomic_check(struct drm_bridge *bridge,
 			    struct drm_crtc_state *crtc_state,
 			    struct drm_connector_state *conn_state)
 {
+	struct drm_connector_state *old_conn_state;
 	struct msm_dp *dp;
 
 	dp = to_dp_bridge(bridge)->msm_dp_display;
+	old_conn_state = drm_atomic_get_old_connector_state(conn_state->state,
+							    conn_state->connector);
+	if (msm_dp_display_mst_supported(dp) && crtc_state && conn_state->crtc &&
+	    drm_mode_is_420_only(&conn_state->connector->display_info,
+				 &crtc_state->adjusted_mode) &&
+	    (conn_state->colorspace != DRM_MODE_COLORIMETRY_DEFAULT ||
+	     conn_state->hdr_output_metadata))
+		return -EINVAL;
+	if (msm_dp_display_mst_supported(dp) && old_conn_state && crtc_state &&
+	    conn_state->crtc &&
+	    (!drm_connector_atomic_hdr_metadata_equal(old_conn_state, conn_state) ||
+	     old_conn_state->colorspace != conn_state->colorspace))
+		crtc_state->mode_changed = true;
 
 	drm_dbg_dp(dp->drm_dev, "link_ready = %s\n",
 		str_true_false(dp->link_ready));
@@ -378,6 +392,26 @@ int msm_dp_bridge_init(struct msm_dp *msm_dp_display, struct drm_device *dev,
 	return 0;
 }
 
+void msm_dp_drm_attach_colorspace_property(struct drm_connector *connector,
+					   struct drm_connector *base_connector)
+{
+	u32 colorspaces = BIT(DRM_MODE_COLORIMETRY_BT2020_RGB) |
+			  BIT(DRM_MODE_COLORIMETRY_DCI_P3_RGB_D65);
+
+	if (base_connector && base_connector != connector) {
+		if (!base_connector->colorspace_property)
+			return;
+
+		connector->colorspace_property =
+			base_connector->colorspace_property;
+	} else if (drm_mode_create_dp_colorspace_property(connector,
+							    colorspaces)) {
+		return;
+	}
+
+	drm_connector_attach_colorspace_property(connector);
+}
+
 /* connector initialization */
 struct drm_connector *msm_dp_drm_connector_init(struct msm_dp *msm_dp_display,
 					    struct drm_encoder *encoder)
@@ -388,8 +422,13 @@ struct drm_connector *msm_dp_drm_connector_init(struct msm_dp *msm_dp_display,
 	if (IS_ERR(connector))
 		return connector;
 
-	if (!msm_dp_display->is_edp)
+	if (!msm_dp_display->is_edp) {
 		drm_connector_attach_dp_subconnector_property(connector);
+		if (msm_dp_display_mst_supported(msm_dp_display)) {
+			msm_dp_drm_attach_colorspace_property(connector, connector);
+			drm_connector_attach_hdr_output_metadata_property(connector);
+		}
+	}
 
 	drm_connector_attach_encoder(connector, encoder);
 

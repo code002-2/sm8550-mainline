@@ -12,6 +12,7 @@
 #define DP_MAX_PIXEL_CLK_KHZ	675000
 
 struct drm_dp_aux;
+struct drm_connector_state;
 struct msm_dp_ctrl;
 struct msm_dp_mst;
 
@@ -41,11 +42,16 @@ struct msm_dp_ctrl *msm_dp_display_get_ctrl(struct msm_dp *msm_dp_display);
 int msm_dp_display_mst_stream_enable(struct msm_dp *msm_dp_display,
 				     enum msm_dp_stream_id stream_id,
 				     const struct drm_display_mode *mode,
-				     u32 bpp, int pbn);
+				     u32 bpp, u32 colorspace, int pbn);
 void msm_dp_display_mst_stream_pre_disable(struct msm_dp *msm_dp_display,
 					   enum msm_dp_stream_id stream_id);
 void msm_dp_display_mst_stream_disable(struct msm_dp *msm_dp_display,
 				       enum msm_dp_stream_id stream_id);
+void msm_dp_display_mst_stream_config_spd(struct msm_dp *msm_dp_display,
+					  enum msm_dp_stream_id stream_id);
+int msm_dp_display_mst_stream_config_hdr(struct msm_dp *msm_dp_display,
+					 enum msm_dp_stream_id stream_id,
+				const struct drm_connector_state *conn_state);
 void msm_dp_display_mst_set_channel(struct msm_dp *msm_dp_display,
 				    enum msm_dp_stream_id stream_id,
 				    u32 start_slot, u32 num_slots);

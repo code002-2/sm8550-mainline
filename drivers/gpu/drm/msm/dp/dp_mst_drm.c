@@ -151,6 +151,7 @@ static int msm_dp_mst_bridge_atomic_check(struct drm_bridge *bridge,
 					  struct drm_crtc_state *crtc_state,
 					  struct drm_connector_state *conn_state)
 {
+	struct drm_connector_state *old_conn_state;
 	struct msm_dp_mst_bridge *mst_bridge = to_msm_dp_mst_bridge(bridge);
 	struct msm_dp_mst_bridge_state *mst_state =
 		to_msm_dp_mst_bridge_state(bridge_state);
@@ -159,6 +160,13 @@ static int msm_dp_mst_bridge_atomic_check(struct drm_bridge *bridge,
 	struct drm_dp_mst_topology_state *topology_state;
 	u32 link_rate, lane_count;
 	int bpp, slots;
+
+	old_conn_state = drm_atomic_get_old_connector_state(conn_state->state,
+							    conn_state->connector);
+	if (old_conn_state && crtc_state && conn_state->crtc &&
+	    (!drm_connector_atomic_hdr_metadata_equal(old_conn_state, conn_state) ||
+	     old_conn_state->colorspace != conn_state->colorspace))
+		crtc_state->mode_changed = true;
 
 	/* Plane-only updates do not change the VC payload. */
 	if (!conn_state->crtc || !crtc_state->active ||
@@ -319,6 +327,7 @@ static void msm_dp_mst_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 	struct drm_bridge_state *bridge_atomic_state;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
+	struct drm_connector_state *conn_state;
 	u32 bpp;
 	int ret;
 
@@ -350,10 +359,15 @@ static void msm_dp_mst_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 	crtc_state = crtc ? drm_atomic_get_new_crtc_state(state, crtc) : NULL;
 	if (WARN_ON(!crtc_state))
 		return;
+	conn_state = drm_atomic_get_new_connector_state(state,
+							&connector->connector);
+	if (WARN_ON(!conn_state))
+		return;
 	bpp = msm_dp_mst_connector_bpp(&connector->connector);
 
 	ret = msm_dp_display_mst_stream_enable(bridge->dp, bridge->stream_id,
 					       &crtc_state->adjusted_mode, bpp,
+					       conn_state->colorspace,
 					       bridge_state->pbn);
 	if (ret) {
 		drm_err(mst->mgr.dev, "failed to enable MST stream %u: %d\n",
@@ -381,6 +395,13 @@ static void msm_dp_mst_bridge_atomic_enable(struct drm_bridge *drm_bridge,
 		drm_err(mst->mgr.dev, "failed to add MST payload part 2: %d\n", ret);
 		return;
 	}
+
+	msm_dp_display_mst_stream_config_spd(bridge->dp, bridge->stream_id);
+	ret = msm_dp_display_mst_stream_config_hdr(bridge->dp,
+						   bridge->stream_id, conn_state);
+	if (ret)
+		drm_dbg_dp(mst->mgr.dev, "failed to configure MST HDR: %d\n", ret);
+
 }
 
 static void msm_dp_mst_bridge_atomic_disable(struct drm_bridge *drm_bridge,
@@ -445,6 +466,7 @@ stop_stream:
 	 * damaged state reaches commit, still stop the source stream and release
 	 * its PM reference in post-disable rather than leaving hardware running.
 	 */
+	msm_dp_display_mst_stream_config_hdr(bridge->dp, bridge->stream_id, NULL);
 	if (!payload_removed)
 		msm_dp_display_mst_set_channel(bridge->dp, bridge->stream_id, 0, 0);
 	if (bridge->stream_started && !bridge->stream_pre_disabled) {
@@ -530,6 +552,8 @@ msm_dp_mst_connector_mode_valid(struct drm_connector *connector,
 
 	if (!mode_pclk_khz)
 		return MODE_CLOCK_LOW;
+	if (drm_mode_is_420_only(&connector->display_info, mode))
+		return MODE_NO_420;
 
 	if (msm_dp_wide_bus_available(mst_conn->mst->dp))
 		mode_pclk_khz /= 2;
@@ -722,6 +746,9 @@ msm_dp_mst_add_connector(struct drm_dp_mst_topology_mgr *mgr,
 				   mgr->dev->mode_config.tile_property, 0);
 	drm_connector_set_path_property(&mst_conn->connector, path);
 	msm_dp_mst_connector_funcs.reset(&mst_conn->connector);
+	msm_dp_drm_attach_colorspace_property(&mst_conn->connector,
+					      mst->dp->connector);
+	drm_connector_attach_hdr_output_metadata_property(&mst_conn->connector);
 	drm_dp_mst_get_port_malloc(port);
 
 	return &mst_conn->connector;

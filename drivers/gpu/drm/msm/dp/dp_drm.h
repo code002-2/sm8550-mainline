@@ -21,6 +21,8 @@ struct msm_dp_bridge {
 
 struct drm_connector *msm_dp_drm_connector_init(struct msm_dp *msm_dp_display,
 					    struct drm_encoder *encoder);
+void msm_dp_drm_attach_colorspace_property(struct drm_connector *connector,
+					   struct drm_connector *base_connector);
 int msm_dp_bridge_init(struct msm_dp *msm_dp_display, struct drm_device *dev,
 		   struct drm_encoder *encoder,
 		   bool yuv_supported);
