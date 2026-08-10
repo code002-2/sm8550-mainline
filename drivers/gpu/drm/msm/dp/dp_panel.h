@@ -45,6 +45,8 @@ struct msm_dp_panel {
 	struct msm_dp_panel_psr psr_cap;
 	bool video_test;
 	bool vsc_sdp_supported;
+	/* DPU wide-bus selection is per hardware stream. */
+	bool wide_bus_en;
 	u32 hw_revision;
 
 	u32 max_bw_code;
@@ -97,6 +99,7 @@ static inline bool is_lane_count_valid(u32 lane_count)
 struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux,
 			      struct msm_dp_link *link,
 			      void __iomem *link_base,
-			      void __iomem *p0_base);
+			      void __iomem *p_base,
+			      enum msm_dp_stream_id stream_id);
 void msm_dp_panel_put(struct msm_dp_panel *msm_dp_panel);
 #endif /* _DP_PANEL_H_ */
