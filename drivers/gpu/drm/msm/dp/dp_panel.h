@@ -14,6 +14,12 @@
 
 struct edid;
 
+enum msm_dp_stream_id {
+	MSM_DP_STREAM_0,
+	MSM_DP_STREAM_1,
+	MSM_DP_STREAM_MAX,
+};
+
 struct msm_dp_display_mode {
 	struct drm_display_mode drm_mode;
 	u32 bpp;
