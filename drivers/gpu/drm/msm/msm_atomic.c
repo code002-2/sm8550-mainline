@@ -5,6 +5,7 @@
  */
 
 #include <drm/drm_atomic_uapi.h>
+#include <drm/display/drm_dp_mst_helper.h>
 #include <drm/drm_blend.h>
 #include <drm/drm_self_refresh_helper.h>
 #include <drm/drm_vblank.h>
@@ -234,7 +235,7 @@ int msm_atomic_check(struct drm_device *dev, struct drm_atomic_state *state)
 
 	drm_self_refresh_helper_alter_state(state);
 
-	return 0;
+	return drm_dp_mst_atomic_check(state);
 }
 
 void msm_atomic_commit_tail(struct drm_atomic_state *state)
@@ -247,6 +248,7 @@ void msm_atomic_commit_tail(struct drm_atomic_state *state)
 	bool async = can_do_async(state, &async_crtc);
 
 	trace_msm_atomic_commit_tail_start(async, crtc_mask);
+	drm_dp_mst_atomic_wait_for_dependencies(state);
 
 	kms->funcs->enable_commit(kms);
 

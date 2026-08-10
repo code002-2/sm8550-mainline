@@ -11,6 +11,7 @@
 #include <uapi/linux/sched/types.h>
 
 #include <drm/drm_drv.h>
+#include <drm/display/drm_dp_mst_helper.h>
 #include <drm/drm_mode_config.h>
 #include <drm/drm_vblank.h>
 #include <drm/clients/drm_client_setup.h>
@@ -28,6 +29,7 @@ static const struct drm_mode_config_funcs mode_config_funcs = {
 };
 
 static const struct drm_mode_config_helper_funcs mode_config_helper_funcs = {
+	.atomic_commit_setup = drm_dp_mst_atomic_setup_commit,
 	.atomic_commit_tail = msm_atomic_commit_tail,
 };
 

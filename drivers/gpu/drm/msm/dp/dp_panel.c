@@ -8,6 +8,7 @@
 #include "dp_utils.h"
 
 #include <drm/drm_connector.h>
+#include <drm/display/drm_dp_mst_helper.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_of.h>
 #include <drm/drm_print.h>
@@ -240,7 +241,7 @@ static u32 msm_dp_panel_get_supported_bpp(struct msm_dp_panel *msm_dp_panel,
 }
 
 int msm_dp_panel_read_sink_caps(struct msm_dp_panel *msm_dp_panel,
-	struct drm_connector *connector)
+	struct drm_connector *connector, bool mst_supported)
 {
 	int rc, bw_code;
 	int count;
@@ -280,6 +281,14 @@ int msm_dp_panel_read_sink_caps(struct msm_dp_panel *msm_dp_panel,
 					 msm_dp_panel->downstream_ports);
 	if (rc)
 		return rc;
+
+	if (mst_supported &&
+	    drm_dp_read_mst_cap(panel->aux, msm_dp_panel->dpcd) == DRM_DP_MST) {
+		drm_edid_free(msm_dp_panel->drm_edid);
+		msm_dp_panel->drm_edid = NULL;
+		drm_edid_connector_update(connector, NULL);
+		return 0;
+	}
 
 	drm_edid_free(msm_dp_panel->drm_edid);
 

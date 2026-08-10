@@ -779,6 +779,28 @@ static int _dpu_kms_initialize_displayport(struct drm_device *dev,
 			DPU_ERROR("modeset_init failed for DP, rc = %d\n", rc);
 			return rc;
 		}
+
+		if (msm_dp_mst_supported(priv->kms->dp[i])) {
+			struct msm_dp *dp = priv->kms->dp[i];
+			int stream_id;
+
+			for (stream_id = 0; stream_id < 2; stream_id++) {
+				memset(&info, 0, sizeof(info));
+				info.num_of_h_tiles = 1;
+				info.h_tile_instance[0] = i;
+				info.intf_type = INTF_DP;
+				info.intf_index = stream_id;
+
+				encoder = dpu_encoder_init(dev, DRM_MODE_ENCODER_DPMST,
+							   &info);
+				if (IS_ERR(encoder))
+					return PTR_ERR(encoder);
+
+				rc = msm_dp_mst_modeset_init(dp, encoder, stream_id);
+				if (rc)
+					return rc;
+			}
+		}
 	}
 
 	return 0;

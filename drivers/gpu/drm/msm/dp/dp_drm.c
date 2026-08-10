@@ -14,6 +14,7 @@
 #include "msm_kms.h"
 #include "dp_audio.h"
 #include "dp_drm.h"
+#include "dp_mst_drm.h"
 
 /**
  * msm_dp_bridge_detect - callback to determine if connector is connected
@@ -31,7 +32,8 @@ msm_dp_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 	drm_dbg_dp(dp->drm_dev, "link_ready = %s\n",
 		str_true_false(dp->link_ready));
 
-	return (dp->link_ready) ? connector_status_connected :
+	return (dp->link_ready && !msm_dp_mst_active(dp)) ?
+				connector_status_connected :
 					connector_status_disconnected;
 }
 
@@ -46,6 +48,17 @@ static int msm_dp_bridge_atomic_check(struct drm_bridge *bridge,
 
 	drm_dbg_dp(dp->drm_dev, "link_ready = %s\n",
 		str_true_false(dp->link_ready));
+
+	if (dp->mst) {
+		int ret = msm_dp_mst_root_atomic_check(dp, conn_state);
+
+		if (ret)
+			return ret;
+	}
+
+	/* The root SST encoder shares its first DPU interface with MST stream 0. */
+	if (conn_state->crtc && msm_dp_mst_active(dp))
+		return -ENOTCONN;
 
 	/*
 	 * There is no protection in the DRM framework to check if the display
@@ -80,6 +93,8 @@ static int msm_dp_bridge_get_modes(struct drm_bridge *bridge, struct drm_connect
 		return 0;
 
 	dp = to_dp_bridge(bridge)->msm_dp_display;
+	if (msm_dp_mst_active(dp))
+		return 0;
 
 	/* pluggable case assumes EDID is read when HPD */
 	if (dp->link_ready) {

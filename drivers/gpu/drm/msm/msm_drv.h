@@ -349,6 +349,9 @@ int __init msm_dp_register(void);
 void __exit msm_dp_unregister(void);
 int msm_dp_modeset_init(struct msm_dp *dp_display, struct drm_device *dev,
 			 struct drm_encoder *encoder, bool yuv_supported);
+bool msm_dp_mst_supported(struct msm_dp *dp_display);
+int msm_dp_mst_modeset_init(struct msm_dp *dp_display,
+			    struct drm_encoder *encoder, u32 stream_id);
 void msm_dp_snapshot(struct msm_disp_state *disp_state, struct msm_dp *dp_display);
 bool msm_dp_is_yuv_420_enabled(const struct msm_dp *dp_display,
 			       const struct drm_display_mode *mode);
@@ -368,6 +371,18 @@ static inline int msm_dp_modeset_init(struct msm_dp *dp_display,
 				       struct drm_device *dev,
 				       struct drm_encoder *encoder,
 				       bool yuv_supported)
+{
+	return -EINVAL;
+}
+
+static inline bool msm_dp_mst_supported(struct msm_dp *dp_display)
+{
+	return false;
+}
+
+static inline int msm_dp_mst_modeset_init(struct msm_dp *dp_display,
+					  struct drm_encoder *encoder,
+					  u32 stream_id)
 {
 	return -EINVAL;
 }
